@@ -5,14 +5,12 @@ from torch.nn.utils.rnn import pad_sequence
 
 def collate_batch(samples):
     """
-    Combine individual dataset samples into one training batch.
+    Combine dataset samples into one padded training batch.
 
-    Each sample must be either:
-      - A dictionary containing "text" and "mel"
-      - A tuple containing (text, mel)
-
-    Text shape: (text_length,)
-    Mel shape:  (n_mels, mel_length)
+    Supports:
+      - Dictionary samples using text_sequence and mel.
+      - Dictionary samples using tensor-valued text and mel.
+      - Tuple samples containing (text, mel).
     """
 
     texts = []
@@ -20,15 +18,21 @@ def collate_batch(samples):
 
     for sample in samples:
         if isinstance(sample, dict):
-            text = sample["text"]
+            # LJSpeechDataset stores the original sentence in "text".
+            # The model needs the numerical sequence instead.
+            if "text_sequence" in sample:
+                text = sample["text_sequence"]
+            else:
+                text = sample["text"]
+
             mel = sample["mel"]
+
         else:
             text, mel = sample
 
         text = torch.as_tensor(text, dtype=torch.long)
         mel = torch.as_tensor(mel, dtype=torch.float32)
 
-        # Remove an optional batch dimension from the Mel spectrogram.
         if mel.ndim == 3 and mel.shape[0] == 1:
             mel = mel.squeeze(0)
 
@@ -60,7 +64,6 @@ def collate_batch(samples):
         padding_value=0,
     )
 
-    # Pad Mel spectrograms along their time dimension.
     padded_mels = pad_sequence(
         [mel.transpose(0, 1) for mel in mels],
         batch_first=True,

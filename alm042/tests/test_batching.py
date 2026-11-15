@@ -7,12 +7,14 @@ from voiceforge.batching import collate_batch
 def test_collate_batch_output_shapes():
     samples = [
         {
-            "text": torch.tensor([3, 1, 20]),
-            "mel": torch.randn(80, 12),
+            "text": "cat",
+            "text_sequence": torch.tensor([3, 1, 20]),
+            "mel": torch.randn(1, 80, 12),
         },
         {
-            "text": torch.tensor([8, 5, 12, 12, 15]),
-            "mel": torch.randn(80, 16),
+            "text": "hello",
+            "text_sequence": torch.tensor([8, 5, 12, 12, 15]),
+            "mel": torch.randn(1, 80, 16),
         },
     ]
 
@@ -27,12 +29,14 @@ def test_collate_batch_output_shapes():
 def test_collate_batch_pads_text_with_zero():
     samples = [
         {
-            "text": torch.tensor([3, 1, 20]),
-            "mel": torch.randn(80, 12),
+            "text": "cat",
+            "text_sequence": torch.tensor([3, 1, 20]),
+            "mel": torch.randn(1, 80, 12),
         },
         {
-            "text": torch.tensor([8, 5, 12, 12, 15]),
-            "mel": torch.randn(80, 16),
+            "text": "hello",
+            "text_sequence": torch.tensor([8, 5, 12, 12, 15]),
+            "mel": torch.randn(1, 80, 16),
         },
     ]
 
@@ -56,7 +60,8 @@ def test_collate_batch_supports_tuple_samples():
 def test_collate_batch_rejects_invalid_mel():
     samples = [
         {
-            "text": torch.tensor([3, 1, 20]),
+            "text": "cat",
+            "text_sequence": torch.tensor([3, 1, 20]),
             "mel": torch.randn(80),
         }
     ]
@@ -66,3 +71,20 @@ def test_collate_batch_rejects_invalid_mel():
         assert False, "Expected ValueError"
     except ValueError:
         pass
+
+
+def test_collate_batch_uses_text_sequence():
+    samples = [
+        {
+            "text": "hello world",
+            "text_sequence": torch.tensor([8, 5, 12, 12, 15]),
+            "waveform": torch.randn(1, 22050),
+            "mel": torch.randn(1, 80, 20),
+        }
+    ]
+
+    batch = collate_batch(samples)
+
+    assert batch["text"].tolist() == [[8, 5, 12, 12, 15]]
+    assert batch["text_lengths"].tolist() == [5]
+    assert batch["mel"].shape == (1, 80, 20)

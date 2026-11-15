@@ -3,7 +3,7 @@ import argparse
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from voiceforge.batching import collate_batch
 from voiceforge.dataset import LJSpeechDataset
@@ -20,12 +20,13 @@ def main():
     parser.add_argument(
         "--metadata",
         type=str,
-        default="data/LJSpeech-1.1/metadata.csv",
+        default="data/LJSpeech-1.1/LJSpeech-1.1/metadata.csv",
     )
 
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=0.001)
+    parser.add_argument("--max-samples", type=int, default=0)
 
     parser.add_argument(
         "--checkpoint",
@@ -34,6 +35,15 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.batch_size < 1:
+        raise ValueError("Batch size must be at least 1")
+
+    if args.epochs < 1:
+        raise ValueError("Epochs must be at least 1")
+
+    if args.max_samples < 0:
+        raise ValueError("Maximum samples cannot be negative")
 
     metadata_path = Path(args.metadata)
 
@@ -46,7 +56,14 @@ def main():
 
     dataset = LJSpeechDataset(metadata_path)
 
-    print(f"Dataset samples: {len(dataset)}")
+    print(f"Available samples: {len(dataset)}")
+
+    if args.max_samples > 0:
+        sample_count = min(args.max_samples, len(dataset))
+        dataset = Subset(dataset, range(sample_count))
+        print(f"Using a subset of {sample_count} samples")
+    else:
+        print("Using the complete dataset")
 
     dataloader = DataLoader(
         dataset,
@@ -64,6 +81,9 @@ def main():
     )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if device == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
 
     print(f"Training device: {device}")
     print("Starting VoiceForge training...")

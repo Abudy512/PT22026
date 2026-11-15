@@ -2,3 +2,4 @@ torch
 torchaudio
 numpy
 pytest
+soundfile

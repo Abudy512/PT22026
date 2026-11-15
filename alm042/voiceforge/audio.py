@@ -35,3 +35,22 @@ def load_audio(
         )
 
     return waveform
+
+def mel_spectrogram(
+    waveform: torch.Tensor,
+    sample_rate: int = SAMPLE_RATE,
+    n_mels: int = 80,
+    n_fft: int = 1024,
+    hop_length: int = 256,
+) -> torch.Tensor:
+
+    transform = torchaudio.transforms.MelSpectrogram(
+        sample_rate=sample_rate,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        n_mels=n_mels,
+    )
+
+    mel = transform(waveform)
+
+    return torch.log(mel + 1e-5)

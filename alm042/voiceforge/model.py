@@ -38,27 +38,43 @@ class AcousticModel(nn.Module):
             n_mels,
         )
 
-    def forward(
+        # Predicts the logarithm of the speech duration.
+        self.duration_projection = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def _encode(
         self,
         text: torch.Tensor,
         text_lengths: torch.Tensor,
-        mel_lengths: torch.Tensor,
     ) -> torch.Tensor:
 
         if text.ndim != 2:
-            raise ValueError("Text must have shape (batch, text_length)")
+            raise ValueError(
+                "Text must have shape (batch, text_length)"
+            )
 
-        if text_lengths.ndim != 1 or mel_lengths.ndim != 1:
-            raise ValueError("Length tensors must be one-dimensional")
+        if text_lengths.ndim != 1:
+            raise ValueError(
+                "Text lengths must be one-dimensional"
+            )
 
         if text.shape[0] != text_lengths.shape[0]:
-            raise ValueError("Text batch and text lengths do not match")
+            raise ValueError(
+                "Text batch and text lengths do not match"
+            )
 
-        if text.shape[0] != mel_lengths.shape[0]:
-            raise ValueError("Text batch and Mel lengths do not match")
+        if torch.any(text_lengths <= 0):
+            raise ValueError(
+                "Text lengths must be greater than zero"
+            )
 
-        if torch.any(text_lengths <= 0) or torch.any(mel_lengths <= 0):
-            raise ValueError("Sequence lengths must be greater than zero")
+        if torch.any(text_lengths > text.shape[1]):
+            raise ValueError(
+                "Text lengths cannot exceed the padded text length"
+            )
 
         embedded = self.embedding(text)
 
@@ -76,11 +92,119 @@ class AcousticModel(nn.Module):
             batch_first=True,
         )
 
+        return encoded
+
+    def _predict_log_duration(
+        self,
+        encoded: torch.Tensor,
+        text_lengths: torch.Tensor,
+    ) -> torch.Tensor:
+
+        positions = torch.arange(
+            encoded.shape[1],
+            device=encoded.device,
+        )
+
+        mask = (
+            positions.unsqueeze(0)
+            < text_lengths.to(encoded.device).unsqueeze(1)
+        )
+
+        mask = mask.unsqueeze(-1)
+
+        masked_encoded = encoded * mask
+
+        pooled = masked_encoded.sum(dim=1)
+
+        pooled = pooled / text_lengths.to(
+            encoded.device
+        ).unsqueeze(1)
+
+        return self.duration_projection(pooled).squeeze(-1)
+
+    def predict_log_mel_lengths(
+        self,
+        text: torch.Tensor,
+        text_lengths: torch.Tensor,
+    ) -> torch.Tensor:
+
+        encoded = self._encode(text, text_lengths)
+
+        return self._predict_log_duration(
+            encoded,
+            text_lengths,
+        )
+
+    def predict_mel_lengths(
+        self,
+        text: torch.Tensor,
+        text_lengths: torch.Tensor,
+    ) -> torch.Tensor:
+
+        log_lengths = self.predict_log_mel_lengths(
+            text,
+            text_lengths,
+        )
+
+        return (
+            torch.exp(log_lengths)
+            .round()
+            .clamp(min=1, max=5000)
+            .long()
+        )
+
+    def forward(
+        self,
+        text: torch.Tensor,
+        text_lengths: torch.Tensor,
+        mel_lengths: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+
+        encoded = self._encode(text, text_lengths)
+
+        if mel_lengths is None:
+            log_lengths = self._predict_log_duration(
+                encoded,
+                text_lengths,
+            )
+
+            mel_lengths = (
+                torch.exp(log_lengths)
+                .round()
+                .clamp(min=1, max=5000)
+                .long()
+            )
+        else:
+            if mel_lengths.ndim != 1:
+                raise ValueError(
+                    "Mel lengths must be one-dimensional"
+                )
+
+            if text.shape[0] != mel_lengths.shape[0]:
+                raise ValueError(
+                    "Text batch and Mel lengths do not match"
+                )
+
+            if torch.any(mel_lengths <= 0):
+                raise ValueError(
+                    "Mel lengths must be greater than zero"
+                )
+
+            mel_lengths = mel_lengths.to(
+                device=encoded.device,
+                dtype=torch.long,
+            )
+
         mel_sequences = []
 
         for index in range(text.shape[0]):
-            valid_text_length = int(text_lengths[index].item())
-            target_mel_length = int(mel_lengths[index].item())
+            valid_text_length = int(
+                text_lengths[index].item()
+            )
+
+            target_mel_length = int(
+                mel_lengths[index].item()
+            )
 
             hidden = encoded[index, :valid_text_length]
 
@@ -93,7 +217,10 @@ class AcousticModel(nn.Module):
                 align_corners=False,
             )
 
-            expanded = expanded.squeeze(0).transpose(0, 1)
+            expanded = (
+                expanded.squeeze(0)
+                .transpose(0, 1)
+            )
 
             mel = self.mel_projection(expanded)
 

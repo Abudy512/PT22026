@@ -1,71 +1,88 @@
 
 import torch
-from torch.nn.utils.rnn import pad_sequence
 
 from voiceforge.model import AcousticModel
-from voiceforge.text import CHAR_TO_ID, text_to_sequence
 
 
 def create_test_inputs():
-    sequences = [
-        torch.tensor(text_to_sequence("cat"), dtype=torch.long),
-        torch.tensor(text_to_sequence("hello"), dtype=torch.long),
-    ]
+    text = torch.tensor([
+        [1, 2, 3, 4, 5],
+        [1, 2, 3, 0, 0],
+    ])
 
-    texts = pad_sequence(
-        sequences,
-        batch_first=True,
-        padding_value=0,
-    )
+    text_lengths = torch.tensor([5, 3])
 
-    text_lengths = torch.tensor([3, 5])
-    mel_lengths = torch.tensor([12, 16])
-
-    return texts, text_lengths, mel_lengths
+    return text, text_lengths
 
 
-def test_acoustic_model_output_shape():
-    model = AcousticModel(
-        vocab_size=len(CHAR_TO_ID),
-        n_mels=80,
-        embedding_dim=32,
-        hidden_dim=32,
-    )
+def test_model_output_shape():
+    model = AcousticModel()
+    text, text_lengths = create_test_inputs()
+    mel_lengths = torch.tensor([10, 6])
 
-    texts, text_lengths, mel_lengths = create_test_inputs()
+    output = model(text, text_lengths, mel_lengths)
 
-    output = model(texts, text_lengths, mel_lengths)
-
-    assert output.shape == (2, 80, 16)
+    assert output.shape == (2, 80, 10)
 
 
-def test_acoustic_model_output_is_finite():
-    model = AcousticModel(
-        vocab_size=len(CHAR_TO_ID),
-        embedding_dim=32,
-        hidden_dim=32,
-    )
+def test_model_output_is_finite():
+    model = AcousticModel()
+    text, text_lengths = create_test_inputs()
+    mel_lengths = torch.tensor([10, 6])
 
-    texts, text_lengths, mel_lengths = create_test_inputs()
-
-    output = model(texts, text_lengths, mel_lengths)
+    output = model(text, text_lengths, mel_lengths)
 
     assert torch.isfinite(output).all()
 
 
-def test_acoustic_model_supports_training():
-    model = AcousticModel(
-        vocab_size=len(CHAR_TO_ID),
-        embedding_dim=32,
-        hidden_dim=32,
-    )
+def test_model_supports_training():
+    model = AcousticModel()
+    text, text_lengths = create_test_inputs()
+    mel_lengths = torch.tensor([10, 6])
 
-    texts, text_lengths, mel_lengths = create_test_inputs()
+    output = model(text, text_lengths, mel_lengths)
+    loss = output.abs().mean()
 
-    output = model(texts, text_lengths, mel_lengths)
-
-    loss = output.mean()
     loss.backward()
 
+    assert model.embedding.weight.grad is not None
     assert model.mel_projection.weight.grad is not None
-    assert torch.isfinite(model.mel_projection.weight.grad).all()
+
+
+def test_model_predicts_positive_mel_lengths():
+    model = AcousticModel()
+    model.eval()
+
+    text, text_lengths = create_test_inputs()
+
+    with torch.no_grad():
+        lengths = model.predict_mel_lengths(
+            text,
+            text_lengths,
+        )
+
+    assert lengths.shape == (2,)
+    assert torch.all(lengths > 0)
+
+
+def test_model_generates_mel_without_target_lengths():
+    model = AcousticModel()
+    model.eval()
+
+    text, text_lengths = create_test_inputs()
+
+    with torch.no_grad():
+        predicted_lengths = model.predict_mel_lengths(
+            text,
+            text_lengths,
+        )
+
+        mel = model(text, text_lengths)
+
+    assert mel.shape == (
+        2,
+        80,
+        int(predicted_lengths.max().item()),
+    )
+
+    assert torch.isfinite(mel).all()

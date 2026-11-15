@@ -18,10 +18,16 @@ def train_model(
         raise ValueError("Epochs must be at least 1")
 
     if learning_rate <= 0:
-        raise ValueError("Learning rate must be greater than zero")
+        raise ValueError(
+            "Learning rate must be greater than zero"
+        )
 
     if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = (
+            "cuda"
+            if torch.cuda.is_available()
+            else "cpu"
+        )
 
     device = torch.device(device)
     model = model.to(device)
@@ -32,16 +38,20 @@ def train_model(
     )
 
     loss_function = nn.L1Loss(reduction="none")
+    duration_loss_function = nn.MSELoss()
+
     history = []
 
     for epoch in range(epochs):
         model.train()
+
         total_loss = 0.0
         batch_count = 0
 
         for batch in dataloader:
             texts = batch["text"].to(device)
             text_lengths = batch["text_lengths"].to(device)
+
             targets = batch["mel"].to(device)
             mel_lengths = batch["mel_lengths"].to(device)
 
@@ -69,16 +79,48 @@ def train_model(
                 < mel_lengths.unsqueeze(1)
             ).unsqueeze(1)
 
-            errors = loss_function(predictions, targets)
+            errors = loss_function(
+                predictions,
+                targets,
+            )
 
             masked_errors = errors * mask
 
-            valid_elements = mask.sum() * targets.shape[1]
+            valid_elements = (
+                mask.sum() * targets.shape[1]
+            )
 
-            loss = masked_errors.sum() / valid_elements
+            mel_loss = (
+                masked_errors.sum() / valid_elements
+            )
+
+            # Train the duration predictor when supported.
+            if hasattr(model, "predict_log_mel_lengths"):
+                predicted_log_lengths = (
+                    model.predict_log_mel_lengths(
+                        texts,
+                        text_lengths,
+                    )
+                )
+
+                target_log_lengths = torch.log(
+                    mel_lengths.float()
+                )
+
+                duration_loss = duration_loss_function(
+                    predicted_log_lengths,
+                    target_log_lengths,
+                )
+
+                loss = mel_loss + 0.1 * duration_loss
+
+            else:
+                loss = mel_loss
 
             if not torch.isfinite(loss):
-                raise ValueError("Training loss is not finite")
+                raise ValueError(
+                    "Training loss is not finite"
+                )
 
             loss.backward()
 
@@ -93,7 +135,9 @@ def train_model(
             batch_count += 1
 
         if batch_count == 0:
-            raise ValueError("The training dataloader is empty")
+            raise ValueError(
+                "The training dataloader is empty"
+            )
 
         average_loss = total_loss / batch_count
         history.append(average_loss)
@@ -107,12 +151,16 @@ def train_model(
             }
 
             checkpoint_file = Path(checkpoint_path)
+
             checkpoint_file.parent.mkdir(
                 parents=True,
                 exist_ok=True,
             )
 
-            torch.save(checkpoint, checkpoint_file)
+            torch.save(
+                checkpoint,
+                checkpoint_file,
+            )
 
         print(
             f"Epoch {epoch + 1}/{epochs} "

@@ -22,3 +22,9 @@ logs/
 
 # IDE
 .vscode/
+
+# Generated audio
+outputs/
+
+# Generated audio
+outputs/

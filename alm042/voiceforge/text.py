@@ -1,12 +1,44 @@
 
-"""
-Text processing utilities for VoiceForge.
-"""
-
 import re
+import unicodedata
 
 
-CHARACTERS = " abcdefghijklmnopqrstuvwxyz'.,!?-\";:"
+def normalize_text(text: str) -> str:
+    """
+    Normalize English text before converting it into character IDs.
+    """
+
+    text = text.strip()
+
+    # Convert smart punctuation to standard ASCII punctuation.
+    replacements = {
+        "’": "'",
+        "‘": "'",
+        "“": '"',
+        "”": '"',
+        "–": "-",
+        "—": "-",
+        "…": "...",
+    }
+
+    for original, replacement in replacements.items():
+        text = text.replace(original, replacement)
+
+    # Remove square brackets but preserve the words inside them.
+    text = text.replace("[", " ")
+    text = text.replace("]", " ")
+
+    # Convert accented characters to their basic ASCII equivalents.
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
+
+    # Standardize whitespace and capitalization.
+    text = re.sub(r"\s+", " ", text)
+    return text.lower()
+
+
+# Keep the original character order so existing character IDs do not change.
+CHARACTERS = " abcdefghijklmnopqrstuvwxyz'.,!?-\";:()"
 
 CHAR_TO_ID = {
     character: index
@@ -14,15 +46,11 @@ CHAR_TO_ID = {
 }
 
 
-def normalize_text(text: str) -> str:
-    """Normalize text before converting it into character IDs."""
-    text = text.strip()
-    text = re.sub(r"\s+", " ", text)
-    return text.lower()
-
-
 def text_to_sequence(text: str) -> list[int]:
-    """Convert text into a sequence of character IDs."""
+    """
+    Convert normalized text into a list of numerical character IDs.
+    """
+
     text = normalize_text(text)
 
     unsupported = get_unsupported_characters(text)
@@ -32,14 +60,20 @@ def text_to_sequence(text: str) -> list[int]:
             f"Unsupported characters: {unsupported}"
         )
 
-    return [CHAR_TO_ID[character] for character in text]
+    return [
+        CHAR_TO_ID[character]
+        for character in text
+    ]
 
 
 def sequence_to_text(sequence: list[int]) -> str:
-    """Convert character IDs back into text."""
+    """
+    Convert numerical character IDs back into text.
+    """
+
     id_to_char = {
         index: character
-        for character, index in CHAR_TO_ID.items()
+        for index, character in enumerate(CHARACTERS)
     }
 
     characters = []
@@ -56,7 +90,10 @@ def sequence_to_text(sequence: list[int]) -> str:
 
 
 def get_unsupported_characters(text: str) -> list[str]:
-    """Return unique characters that are not in our vocabulary."""
+    """
+    Return characters that are not supported by the vocabulary.
+    """
+
     text = normalize_text(text)
 
     return sorted({

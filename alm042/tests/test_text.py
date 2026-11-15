@@ -32,3 +32,18 @@ def test_unsupported_characters_raise_error():
 def test_invalid_character_id_raises_error():
     with pytest.raises(ValueError):
         sequence_to_text([3, 999])
+        
+        
+def test_text_to_sequence_supports_double_quotes():
+    text = 'He said "hello".'
+
+    sequence = text_to_sequence(text)
+
+    assert sequence_to_text(sequence) == text.lower()
+
+def test_text_to_sequence_supports_semicolon_and_colon():
+    text = "Wait; really: yes."
+
+    sequence = text_to_sequence(text)
+
+    assert sequence_to_text(sequence) == "wait; really: yes."

@@ -6,7 +6,7 @@ Text processing utilities for VoiceForge.
 import re
 
 
-CHARACTERS = " abcdefghijklmnopqrstuvwxyz'.,!?-\""
+CHARACTERS = " abcdefghijklmnopqrstuvwxyz'.,!?-\";:"
 
 CHAR_TO_ID = {
     character: index

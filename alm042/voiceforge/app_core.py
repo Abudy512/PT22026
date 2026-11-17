@@ -16,15 +16,13 @@ from pathlib import Path
 
 import soundfile as sf
 
+from voiceforge import DEFAULT_CHECKPOINT
 from voiceforge.text import normalize_text, text_to_sequence
 from voiceforge.tts import VoiceForgeTTS
 
 #: Longest text the interface accepts.  The model was trained on short
 #: LJSpeech clips, so long paragraphs only produce long, unreliable output.
 MAX_TEXT_LENGTH = 400
-
-#: Default checkpoint used by the application.
-DEFAULT_CHECKPOINT = "checkpoints/voiceforge_attn.pt"
 
 #: Default folder for generated audio (git-ignored).
 DEFAULT_OUTPUT_DIR = "outputs/app"

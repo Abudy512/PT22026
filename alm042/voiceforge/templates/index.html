@@ -145,6 +145,24 @@
   }
   .download:hover { background: #dbeafe; }
   .examples { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .controls { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+  .control { flex: 1 1 220px; }
+  .control label { margin-bottom: 6px; }
+  select {
+    width: 100%;
+    padding: 10px 12px;
+    font: inherit;
+    font-size: 0.95rem;
+    color: var(--ink);
+    background: #f8fafc;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    outline: none;
+  }
+  select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+  }
   .chip {
     font-size: 0.82rem;
     border: 1px solid #cbd5e1;
@@ -170,17 +188,41 @@
 <main>
   <header>
     <h1>Voice<span>Forge</span></h1>
-    <p>A custom English text-to-speech system built from scratch with PyTorch
-       and trained on LJSpeech — no pretrained TTS model is used.</p>
+    <p>An English text-to-speech application with two engines: the pretrained
+       Kokoro-82M model for natural speech, and the student-built VoiceForge
+       acoustic model for comparison.</p>
   </header>
 
   <section class="card">
     <div class="notice">
-      <strong>Experimental model.</strong> This is a small student-built
-      acoustic model trained on a limited subset of LJSpeech. It produces
-      clearly synthesised, buzzy audio and is <strong>not expected to be
-      fully intelligible</strong>. Treat it as a working demonstration of a
-      complete TTS pipeline, not as a production voice.
+      <strong>About the engines.</strong> <em>Kokoro-82M</em> is a pretrained
+      open-weight model by hexgrad (Apache-2.0) — it was <strong>not</strong>
+      trained by this project, only integrated. The <em>VoiceForge custom
+      model</em> is the student's own work: a small Tacotron-lite trained on
+      LJSpeech that is experimental and <strong>not expected to be
+      intelligible</strong>.
+    </div>
+
+    <div class="controls">
+      <div class="control">
+        <label for="engine">Speech engine</label>
+        <select id="engine">
+          <option value="kokoro" selected>Kokoro-82M — natural speech</option>
+          <option value="voiceforge">VoiceForge custom — experimental</option>
+        </select>
+      </div>
+      <div class="control" id="voice-row">
+        <label for="voice">Kokoro voice</label>
+        <select id="voice">
+          <option value="af_heart" selected>af_heart — female, warm</option>
+          <option value="af_bella">af_bella — female, expressive</option>
+          <option value="af_nicole">af_nicole — female, soft</option>
+          <option value="af_sarah">af_sarah — female, neutral</option>
+          <option value="am_michael">am_michael — male, calm</option>
+          <option value="am_adam">am_adam — male, deeper</option>
+          <option value="am_onyx">am_onyx — male, low</option>
+        </select>
+      </div>
     </div>
 
     <label for="text">English text</label>
@@ -211,8 +253,7 @@
   </section>
 
   <footer>
-    Custom acoustic model + Griffin-Lim reconstruction · 22,050 Hz ·
-    Checkpoint <code id="checkpoint-name">voiceforge_attn.pt</code>
+    Kokoro-82M (pretrained, Apache-2.0) · VoiceForge custom model (Tacotron-lite + Griffin-Lim)
     <br>Running locally. No audio is uploaded anywhere.
   </footer>
 </main>
@@ -228,6 +269,16 @@
   const player = document.getElementById("player");
   const download = document.getElementById("download");
   const meta = document.getElementById("meta");
+  const engineSelect = document.getElementById("engine");
+  const voiceSelect = document.getElementById("voice");
+  const voiceRow = document.getElementById("voice-row");
+
+  function syncEngine() {
+    voiceRow.style.display = engineSelect.value === "kokoro" ? "" : "none";
+  }
+
+  engineSelect.addEventListener("change", syncEngine);
+  syncEngine();
 
   function updateCounter() {
     counter.textContent = text.value.length + " / 400 characters";
@@ -275,7 +326,11 @@
       const response = await fetch("/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: value })
+        body: JSON.stringify({
+          text: value,
+          engine: engineSelect.value,
+          voice: engineSelect.value === "kokoro" ? voiceSelect.value : null
+        })
       });
 
       const data = await response.json();
@@ -290,7 +345,12 @@
       download.setAttribute("download", data.filename);
       output.classList.add("visible");
 
-      let message = "Generated " + data.duration_seconds + " s of audio.";
+      const engineName = data.engine === "kokoro"
+        ? "Kokoro-82M"
+        : "the VoiceForge custom model";
+
+      let message = "Generated " + data.duration_seconds +
+        " s of audio with " + engineName + ".";
       if (data.padded) {
         message += " The model produced a very short output, which was padded.";
       }
@@ -299,9 +359,8 @@
       }
       showStatus(message);
 
-      meta.textContent = data.device
-        ? "Running on " + data.device + " · " + data.filename
-        : data.filename;
+      meta.textContent = engineName + " · " + data.sample_rate + " Hz · " +
+        data.filename;
 
       player.load();
     } catch (error) {

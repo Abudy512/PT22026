@@ -9,6 +9,9 @@ venv/
 # Test and tool caches
 .pytest_cache/
 pytest-of-*/
+
+# espeak-ng runtime extraction (Kokoro dependency) when TEMP is not set
+/tmp*/
 *.egg-info/
 
 # Datasets (large, downloaded separately)

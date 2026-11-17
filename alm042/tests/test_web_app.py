@@ -27,6 +27,7 @@ def server(tmp_path, tiny_checkpoint):
         output_dir=tmp_path / "app_outputs",
         griffin_lim_iterations=2,
         max_mel_frames=32,
+        engine="voiceforge",
     )
 
     httpd = create_server(app, host="127.0.0.1", port=0)
@@ -67,9 +68,10 @@ def test_index_page_is_served(server):
     assert "VoiceForge" in body
     assert "Generate Speech" in body
     assert "Download WAV" in body
-    # The experimental-limitations notice must be visible to the user.
-    assert "Experimental model" in body
-    assert "fully intelligible" in body
+    # The engine description and the honesty notice must be visible.
+    assert "Kokoro" in body
+    assert "not expected to be" in body and "intelligible" in body
+    assert "Speech engine" in body
 
 
 def test_health_endpoint(server):
@@ -79,6 +81,8 @@ def test_health_endpoint(server):
     assert response.status == 200
     assert payload["ok"] is True
     assert payload["model_loaded"] is False
+    assert "engines" in payload
+    assert payload["engines"]["voiceforge"]["checkpoint"].endswith(".pt")
 
 
 def test_generate_returns_audio_url(server):
@@ -90,7 +94,8 @@ def test_generate_returns_audio_url(server):
     assert payload["audio_url"].startswith("/audio/")
     assert payload["audio_url"].endswith(".wav")
     assert payload["duration_seconds"] > 0
-    assert payload["device"] == "cpu"
+    assert payload["engine"] == "voiceforge"
+    assert payload["sample_rate"] == 22050
 
 
 def test_generated_audio_can_be_downloaded(server):
@@ -153,3 +158,27 @@ def test_audio_path_traversal_is_rejected(server):
         get(server + "/audio/../app_core.py")
 
     assert error.value.code == 404
+
+
+def test_unknown_engine_returns_400(server):
+    with pytest.raises(urllib.error.HTTPError) as error:
+        post_json(
+            server + "/generate",
+            {"text": "Hello.", "engine": "does-not-exist"},
+        )
+
+    payload = json.loads(error.value.read())
+
+    assert error.value.code == 400
+    assert "Unknown speech engine" in payload["error"]
+
+
+def test_engine_voiceforge_is_accepted_explicitly(server):
+    with post_json(
+        server + "/generate",
+        {"text": "Hello world.", "engine": "voiceforge"},
+    ) as response:
+        payload = json.loads(response.read())
+
+    assert response.status == 200
+    assert payload["engine"] == "voiceforge"

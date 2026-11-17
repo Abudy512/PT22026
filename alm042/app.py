@@ -2,13 +2,19 @@
 
 Examples
 --------
-Start the interface on the default port::
+Start the interface with the pretrained Kokoro engine (default when
+available)::
 
     python app.py
 
-Use a different checkpoint and open the browser automatically::
+Force the pretrained engine, or use only the custom model::
 
-    python app.py --checkpoint checkpoints/voiceforge_attn.pt --open
+    python app.py --engine kokoro
+    python app.py --engine voiceforge --checkpoint checkpoints/voiceforge_attn.pt
+
+Pick a different Kokoro voice and open the browser::
+
+    python app.py --voice am_michael --open
 
 The interface runs entirely locally: no audio or text leaves the machine.
 """
@@ -18,7 +24,16 @@ from __future__ import annotations
 import argparse
 import sys
 
-from voiceforge.app_core import DEFAULT_CHECKPOINT, DEFAULT_OUTPUT_DIR, AppError, VoiceForgeApp
+from voiceforge.app_core import (
+    DEFAULT_CHECKPOINT,
+    DEFAULT_OUTPUT_DIR,
+    ENGINE_AUTO,
+    ENGINE_KOKORO,
+    ENGINE_VOICEFORGE,
+    AppError,
+    VoiceForgeApp,
+)
+from voiceforge.kokoro_backend import DEFAULT_VOICE, KOKORO_VOICES
 from voiceforge.web_app import run
 
 DEFAULT_HOST = "127.0.0.1"
@@ -35,6 +50,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--engine",
+        default=ENGINE_AUTO,
+        choices=[ENGINE_AUTO, ENGINE_KOKORO, ENGINE_VOICEFORGE],
+        help="Speech engine. 'auto' prefers Kokoro when installed.",
+    )
+    parser.add_argument(
+        "--voice",
+        default=DEFAULT_VOICE,
+        choices=list(KOKORO_VOICES),
+        help="Kokoro voice (used when the Kokoro engine is active).",
+    )
     parser.add_argument(
         "--device",
         default=None,
@@ -68,18 +95,42 @@ def main(argv: list[str] | None = None) -> int:
         device=args.device,
         output_dir=args.output_dir,
         griffin_lim_iterations=args.n_iter,
+        engine=args.engine,
+        kokoro_voice=args.voice,
     )
 
-    # Load once at startup so a missing or broken checkpoint is reported
-    # immediately instead of on the first button click.
-    try:
-        app.load()
-    except AppError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        return 1
+    # Load the selected engine once at startup so a missing package, missing
+    # weights or a broken checkpoint is reported immediately instead of on
+    # the first button click.
+    engine = app.resolve_engine()
 
-    print(f"Checkpoint: {args.checkpoint}")
-    print(f"Device: {app.device_description()}")
+    try:
+        if engine == ENGINE_KOKORO:
+            backend = app.load_kokoro()
+            print(f"Engine: Kokoro-82M (voice {app.kokoro_voice}, "
+                  f"{backend.SAMPLE_RATE} Hz)")
+        else:
+            app.load()
+            print(f"Engine: VoiceForge custom model")
+            print(f"Checkpoint: {args.checkpoint}")
+            print(f"Device: {app.device_description()}")
+    except AppError as error:
+        if args.engine == ENGINE_AUTO and engine == ENGINE_KOKORO:
+            print(f"WARNING: {error}")
+            print("Falling back to the VoiceForge custom model.")
+            app.set_engine(ENGINE_VOICEFORGE)
+
+            try:
+                app.load()
+            except AppError as fallback_error:
+                print(f"ERROR: {fallback_error}", file=sys.stderr)
+                return 1
+
+            print(f"Checkpoint: {args.checkpoint}")
+            print(f"Device: {app.device_description()}")
+        else:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
 
     run(
         app,

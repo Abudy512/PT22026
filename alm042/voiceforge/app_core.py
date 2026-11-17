@@ -17,15 +17,33 @@ from pathlib import Path
 import soundfile as sf
 
 from voiceforge import DEFAULT_CHECKPOINT
+from voiceforge.kokoro_backend import (
+    DEFAULT_VOICE,
+    KOKORO_VOICES,
+    KokoroBackend,
+    KokoroError,
+    kokoro_is_installed,
+)
 from voiceforge.text import normalize_text, text_to_sequence
 from voiceforge.tts import VoiceForgeTTS
 
-#: Longest text the interface accepts.  The model was trained on short
-#: LJSpeech clips, so long paragraphs only produce long, unreliable output.
+#: Longest text the interface accepts.
 MAX_TEXT_LENGTH = 400
 
 #: Default folder for generated audio (git-ignored).
 DEFAULT_OUTPUT_DIR = "outputs/app"
+
+#: Speech engines.
+ENGINE_KOKORO = "kokoro"
+ENGINE_VOICEFORGE = "voiceforge"
+ENGINE_AUTO = "auto"
+
+SUPPORTED_ENGINES = (ENGINE_KOKORO, ENGINE_VOICEFORGE)
+
+ENGINE_LABELS = {
+    ENGINE_KOKORO: "Kokoro-82M (pretrained, natural speech)",
+    ENGINE_VOICEFORGE: "VoiceForge custom model (student-built, experimental)",
+}
 
 
 class AppError(Exception):
@@ -42,14 +60,23 @@ class SynthesisResult:
     duration_seconds: float
     truncated: bool
     padded: bool
+    sample_rate: int = 22050
+    engine: str = "voiceforge"
 
 
 class VoiceForgeApp:
     """
-    Small facade around :class:`VoiceForgeTTS` for interactive use.
+    Facade over the available speech engines.
 
-    The model is loaded lazily on the first request so the interface can
-    start quickly, and a lock makes it safe for a multi-threaded web server.
+    Two engines are supported:
+
+    * ``kokoro``     — the pretrained Kokoro-82M model (default when it is
+      installed), which produces natural speech;
+    * ``voiceforge`` — the student's own acoustic model, kept as an
+      experimental backend.
+
+    Models are loaded lazily so the interface starts quickly, and a lock
+    keeps CUDA work thread-safe for the web server.
     """
 
     def __init__(
@@ -59,14 +86,34 @@ class VoiceForgeApp:
         output_dir: str | Path = DEFAULT_OUTPUT_DIR,
         griffin_lim_iterations: int = 32,
         max_mel_frames: int = 2200,
+        engine: str = ENGINE_AUTO,
+        kokoro_voice: str = DEFAULT_VOICE,
+        kokoro_device: str | None = None,
     ):
+        if engine not in (ENGINE_AUTO, *SUPPORTED_ENGINES):
+            raise ValueError(
+                f"Unknown engine {engine!r}. "
+                f"Choose from: {', '.join((ENGINE_AUTO, *SUPPORTED_ENGINES))}"
+            )
+
+        if kokoro_voice not in KOKORO_VOICES:
+            raise ValueError(
+                f"Unknown Kokoro voice {kokoro_voice!r}. "
+                f"Available: {', '.join(KOKORO_VOICES)}"
+            )
+
         self.checkpoint_path = Path(checkpoint_path)
         self.device = device
         self.output_dir = Path(output_dir)
         self.griffin_lim_iterations = griffin_lim_iterations
         self.max_mel_frames = max_mel_frames
 
+        self.requested_engine = engine
+        self.kokoro_voice = kokoro_voice
+        self.kokoro_device = kokoro_device
+
         self._pipeline: VoiceForgeTTS | None = None
+        self._kokoro: KokoroBackend | None = None
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -110,16 +157,94 @@ class VoiceForgeApp:
         pipeline = self.load()
         return str(pipeline.device)
 
+    def load_kokoro(self) -> KokoroBackend:
+        """Load the pretrained Kokoro engine once and reuse it."""
+
+        with self._lock:
+            if self._kokoro is not None:
+                return self._kokoro
+
+            backend = KokoroBackend(
+                voice=self.kokoro_voice,
+                device=self.kokoro_device,
+            )
+
+            try:
+                backend.load()
+            except KokoroError as error:
+                raise AppError(str(error)) from error
+            except ValueError as error:
+                raise AppError(str(error)) from error
+
+            self._kokoro = backend
+            return backend
+
+    def resolve_engine(self, engine: str | None = None) -> str:
+        """
+        Decide which engine to use.
+
+        ``auto`` prefers Kokoro when its package is installed and falls back
+        to the custom model otherwise, so the interface always has a working
+        engine.
+        """
+
+        chosen = engine or self.requested_engine
+
+        if chosen == ENGINE_AUTO:
+            return ENGINE_KOKORO if kokoro_is_installed() else ENGINE_VOICEFORGE
+
+        if chosen not in SUPPORTED_ENGINES:
+            raise AppError(
+                f"Unknown speech engine {chosen!r}. "
+                f"Available: {', '.join(SUPPORTED_ENGINES)}"
+            )
+
+        return chosen
+
+    def describe_engines(self) -> dict:
+        """Summary of the engines for the health endpoint and the banner."""
+
+        return {
+            "default": self.resolve_engine(),
+            "requested": self.requested_engine,
+            "kokoro": {
+                "installed": kokoro_is_installed(),
+                "loaded": self._kokoro is not None,
+                "voices": list(KOKORO_VOICES),
+                "sample_rate": KokoroBackend.SAMPLE_RATE,
+            },
+            "voiceforge": {
+                "checkpoint": str(self.checkpoint_path),
+                "loaded": self._pipeline is not None,
+                "sample_rate": 22050,
+            },
+        }
+
+    def set_engine(self, engine: str) -> None:
+        """Change the default engine (used for startup fallbacks)."""
+
+        if engine not in (ENGINE_AUTO, *SUPPORTED_ENGINES):
+            raise AppError(
+                f"Unknown speech engine {engine!r}. "
+                f"Available: {', '.join(SUPPORTED_ENGINES)}"
+            )
+
+        self.requested_engine = engine
+
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
     @staticmethod
-    def validate_text(text: object) -> str:
+    def validate_text(
+        text: object,
+        engine: str = ENGINE_VOICEFORGE,
+    ) -> str:
         """
         Check user input and return the cleaned text.
 
-        Raises :class:`AppError` with a message that can be shown directly
-        in the interface.
+        The custom model has a fixed 38-character vocabulary, so text for it
+        must be encodable. Kokoro handles digits and richer punctuation, so
+        only the common checks apply there.
         """
 
         if not isinstance(text, str):
@@ -133,45 +258,73 @@ class VoiceForgeApp:
         if len(cleaned) > MAX_TEXT_LENGTH:
             raise AppError(
                 f"Text is too long ({len(cleaned)} characters). "
-                f"Please keep it under {MAX_TEXT_LENGTH} characters, "
-                "because the model was trained on short sentences."
+                f"Please keep it under {MAX_TEXT_LENGTH} characters."
             )
 
-        if not normalize_text(cleaned):
-            raise AppError(
-                "The text contains no usable characters. "
-                "Please enter English words."
-            )
+        if engine == ENGINE_VOICEFORGE:
+            if not normalize_text(cleaned):
+                raise AppError(
+                    "The text contains no usable characters. "
+                    "Please enter English words."
+                )
 
-        try:
-            text_to_sequence(cleaned)
-        except ValueError as error:
-            raise AppError(
-                f"{error}. VoiceForge supports English letters, digits are "
-                "not supported, and the punctuation . , ! ? - ' \" ; : ( )"
-            ) from error
+            try:
+                text_to_sequence(cleaned)
+            except ValueError as error:
+                raise AppError(
+                    f"{error}. The custom VoiceForge model supports English "
+                    "letters and the punctuation . , ! ? - ' \" ; : ( ). "
+                    "Switch to the Kokoro engine for digits."
+                ) from error
+        elif not any(character.isalnum() for character in cleaned):
+            raise AppError("Please enter some English words.")
 
         return cleaned
 
     # ------------------------------------------------------------------
     # Synthesis
     # ------------------------------------------------------------------
-    def synthesize(self, text: object) -> SynthesisResult:
-        """Validate ``text``, generate speech and return the WAV details."""
+    def synthesize(
+        self,
+        text: object,
+        engine: str | None = None,
+        voice: str | None = None,
+    ) -> SynthesisResult:
+        """
+        Validate ``text``, generate speech with the chosen engine and return
+        the WAV details.
 
-        cleaned = self.validate_text(text)
-        pipeline = self.load()
+        ``engine`` may be ``"kokoro"``, ``"voiceforge"`` or ``None`` to use
+        the configured default. ``voice`` only applies to Kokoro.
+        """
+
+        chosen = self.resolve_engine(engine)
+        cleaned = self.validate_text(text, chosen)
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         filename = f"{uuid.uuid4().hex[:12]}.wav"
         output_path = self.output_dir / filename
 
-        # The pipeline holds CUDA state; one generation at a time.
-        with self._lock:
-            pipeline.save(cleaned, output_path)
-            truncated = bool(pipeline.was_truncated)
-            padded = bool(pipeline.was_padded)
+        truncated = False
+        padded = False
+
+        if chosen == ENGINE_KOKORO:
+            backend = self.load_kokoro()
+
+            with self._lock:
+                try:
+                    backend.save(cleaned, output_path, voice=voice)
+                except (KokoroError, ValueError) as error:
+                    raise AppError(str(error)) from error
+        else:
+            pipeline = self.load()
+
+            # The pipeline holds CUDA state; one generation at a time.
+            with self._lock:
+                pipeline.save(cleaned, output_path)
+                truncated = bool(pipeline.was_truncated)
+                padded = bool(pipeline.was_padded)
 
         if not output_path.is_file() or output_path.stat().st_size == 0:
             raise AppError(
@@ -190,6 +343,8 @@ class VoiceForgeApp:
             duration_seconds=round(info.frames / info.samplerate, 2),
             truncated=truncated,
             padded=padded,
+            sample_rate=info.samplerate,
+            engine=chosen,
         )
 
     def resolve_audio(self, filename: str) -> Path:

@@ -120,6 +120,7 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "model_loaded": self.app.is_loaded,
                     "checkpoint": str(self.app.checkpoint_path),
+                    "engines": self.app.describe_engines(),
                 },
             )
             return
@@ -167,7 +168,11 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
 
         try:
             payload = self._read_json_body()
-            result = self.app.synthesize(payload.get("text"))
+            result = self.app.synthesize(
+                payload.get("text"),
+                engine=payload.get("engine") or None,
+                voice=payload.get("voice") or None,
+            )
         except AppError as error:
             self._send_error_json(400, str(error))
             return
@@ -180,9 +185,10 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
                 "filename": result.filename,
                 "audio_url": f"/audio/{result.filename}",
                 "duration_seconds": result.duration_seconds,
+                "sample_rate": result.sample_rate,
+                "engine": result.engine,
                 "padded": result.padded,
                 "truncated": result.truncated,
-                "device": str(self.app.load().device),
             },
         )
 

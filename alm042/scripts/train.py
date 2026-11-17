@@ -32,10 +32,11 @@ import soundfile as sf
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from voiceforge.architectures import ARCH_TACOTRON
+from voiceforge.architectures import ARCH_LEGACY, ARCH_TACOTRON
 from voiceforge.batching import collate_batch
+from voiceforge.checkpoint import build_model, load_model
 from voiceforge.dataset import LJSpeechDataset
-from voiceforge.model import AcousticModel, ModelConfig
+from voiceforge.model import ModelConfig
 from voiceforge.text import CHAR_TO_ID
 from voiceforge.training import train_model
 
@@ -141,6 +142,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_frames < 0:
         raise ValueError("Maximum frames cannot be negative")
 
+    if args.val_samples < 0:
+        raise ValueError("Validation samples cannot be negative")
+
+    if args.max_seconds < 0:
+        raise ValueError("Maximum clip length cannot be negative")
+
+    if args.log_every < 0:
+        raise ValueError("--log-every cannot be negative")
+
     metadata_path = Path(args.metadata)
 
     if not metadata_path.is_file():
@@ -208,19 +218,20 @@ def main(argv: list[str] | None = None) -> int:
             embedding_dim=args.embedding_dim,
             hidden_dim=args.hidden_dim,
             attention_dim=args.attention_dim,
-        )
-        model = AcousticModel(
-            vocab_size=config.vocab_size,
-            n_mels=config.n_mels,
-            embedding_dim=config.embedding_dim,
-            hidden_dim=config.hidden_dim,
-            attention_dim=config.attention_dim,
-        )
+        ).to_dict()
     else:
-        from voiceforge.model_legacy import LegacyAcousticModel
+        config = {
+            "architecture": ARCH_LEGACY,
+            "vocab_size": len(CHAR_TO_ID),
+            "n_mels": 80,
+            "embedding_dim": 128,
+            "hidden_dim": 128,
+        }
 
-        config = None
-        model = LegacyAcousticModel(vocab_size=len(CHAR_TO_ID))
+    # Build the model through the same factory that checkpoint loading uses.
+    # This guarantees that a trained model and an inference model are always
+    # constructed from identical configuration code.
+    model = build_model(config)
 
     parameters = sum(p.numel() for p in model.parameters())
 
@@ -267,6 +278,35 @@ def main(argv: list[str] | None = None) -> int:
 
     for index, loss in enumerate(history, start=1):
         print(f"Epoch {index}: loss = {loss:.4f}")
+
+    # Load the checkpoint back exactly as the inference pipeline will.  If
+    # training and inference ever disagreed about the architecture, this
+    # check fails here instead of in the application.
+    print("\nVerifying the saved checkpoint loads for inference...")
+
+    restored, restored_config, restored_metadata = load_model(
+        args.checkpoint,
+        map_location="cpu",
+    )
+
+    restored_parameters = sum(p.numel() for p in restored.parameters())
+
+    if restored_config.get("architecture") != config["architecture"]:
+        raise RuntimeError(
+            "Saved checkpoint architecture does not match the trained model"
+        )
+
+    if restored_parameters != parameters:
+        raise RuntimeError(
+            f"Saved checkpoint has {restored_parameters:,} parameters, "
+            f"but the trained model has {parameters:,}"
+        )
+
+    print(
+        f"Checkpoint OK: {restored_config['architecture']}, "
+        f"{restored_parameters:,} parameters, "
+        f"epoch {restored_metadata['epoch']}"
+    )
 
     print(f"Checkpoint: {args.checkpoint}")
     print(f"History: {args.history}")

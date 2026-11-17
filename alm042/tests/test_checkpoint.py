@@ -150,3 +150,72 @@ def test_weights_that_do_not_match_architecture_raise(tmp_path):
 
     with pytest.raises(ValueError, match="do not match|does not match"):
         load_model(path)
+
+
+def test_round_trip_preserves_weights(tmp_path):
+    """A model built from its own config must reload exactly."""
+
+    config = ModelConfig(vocab_size=38, hidden_dim=16, attention_dim=8).to_dict()
+
+    original = build_model(config)
+
+    path = tmp_path / "round_trip.pt"
+    torch.save(
+        {
+            "model_state_dict": original.state_dict(),
+            "model_config": config,
+            "epoch": 1,
+        },
+        path,
+    )
+
+    restored, restored_config, _ = load_model(path)
+
+    assert restored_config["hidden_dim"] == 16
+
+    original_state = original.state_dict()
+    restored_state = restored.state_dict()
+
+    assert original_state.keys() == restored_state.keys()
+
+    for key in original_state:
+        assert torch.equal(original_state[key], restored_state[key]), key
+
+
+def test_checkpoint_without_duration_head_reports_clear_error(tmp_path):
+    """Checkpoints from before the duration predictor must fail clearly."""
+
+    legacy = LegacyAcousticModel(
+        vocab_size=38,
+        n_mels=80,
+        embedding_dim=16,
+        hidden_dim=32,
+    )
+
+    state = legacy.state_dict()
+    state = {
+        key: value
+        for key, value in state.items()
+        if not key.startswith("duration_projection")
+    }
+
+    path = tmp_path / "old_smoke.pt"
+
+    torch.save(
+        {
+            "model_state_dict": state,
+            "model_config": {
+                "architecture": ARCH_LEGACY,
+                "vocab_size": 38,
+                "n_mels": 80,
+                "embedding_dim": 16,
+                "hidden_dim": 32,
+            },
+            "epoch": 1,
+        },
+        path,
+    )
+
+    with pytest.raises(ValueError, match="before the duration predictor"):
+        load_model(path)
+

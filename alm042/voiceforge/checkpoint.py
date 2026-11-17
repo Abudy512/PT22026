@@ -209,6 +209,28 @@ def load_model(
     try:
         model.load_state_dict(contents["state_dict"])
     except RuntimeError as error:
+        message = str(error)
+
+        # The early smoke-test checkpoint predates the duration predictor,
+        # so its only mismatch is a set of missing duration weights.
+        # Anything else (for example weights from a different architecture)
+        # is a genuine mismatch and must use the generic message.
+        is_pre_duration_checkpoint = (
+            "Missing key(s)" in message
+            and "duration_projection" in message
+            and "Unexpected key(s)" not in message
+        )
+
+        if is_pre_duration_checkpoint:
+            raise ValueError(
+                "This checkpoint was created before the duration predictor "
+                "existed (early smoke-test checkpoints have this shape), so "
+                "it cannot be used with the current model. Train a new "
+                "checkpoint with scripts/train.py, or use "
+                "checkpoints/voiceforge.pt (baseline) or "
+                "checkpoints/voiceforge_attn.pt (current model)."
+            ) from error
+
         raise ValueError(
             "Checkpoint weights do not match the model architecture. "
             "The checkpoint may have been produced by a different version "

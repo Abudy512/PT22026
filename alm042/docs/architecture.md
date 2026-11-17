@@ -237,6 +237,17 @@ work with both architectures. Checkpoints record `architecture` and
 `model_config`, so `load_model()` rebuilds the right class automatically;
 old checkpoints without a config are treated as the legacy architecture.
 
+`scripts/train.py` now builds the model through the same `build_model()`
+factory that checkpoint loading uses, and after training it loads the saved
+checkpoint back and checks the architecture and parameter count. Training
+and inference therefore cannot silently disagree about the model.
+
+Checkpoints created before the duration predictor existed (the early
+`smoke_test.pt` artifact) are not compatible with the current model. The
+loader detects the missing weights and reports an actionable error instead
+of failing with a raw state-dict dump. Those files are historical
+smoke-test artefacts, not usable models.
+
 ## 8. Known limitations
 
 * **Small training set.** 3,000 short clips and ~80 minutes of training are

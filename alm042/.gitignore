@@ -1,16 +1,20 @@
-
 # Python
 __pycache__/
 *.py[cod]
 
 # Virtual environment
 .venv/
+venv/
 
-# Datasets
+# Test and tool caches
+.pytest_cache/
+*.egg-info/
+
+# Datasets (large, downloaded separately)
 data/
 datasets/
 
-# Model checkpoints and weights
+# Model checkpoints and weights (large, trained separately)
 checkpoints/
 *.pt
 *.pth
@@ -22,9 +26,7 @@ logs/
 
 # IDE
 .vscode/
+.idea/
 
-# Generated audio
-outputs/
-
-# Generated audio
+# Generated audio and application output
 outputs/

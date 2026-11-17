@@ -1,5 +1,12 @@
+# Core runtime
 torch
 torchaudio
 numpy
-pytest
 soundfile
+
+# Testing
+pytest
+
+# Optional: Gradio front-end (python app_gradio.py).
+# The bundled interface (python app.py) needs no extra packages.
+# gradio

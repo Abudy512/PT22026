@@ -11,7 +11,31 @@ import torch
 from torch.utils.data import Dataset
 
 from voiceforge.audio import SAMPLE_RATE, load_audio, mel_spectrogram
-from voiceforge.text import text_to_sequence
+from voiceforge.text import get_unsupported_characters, text_to_sequence
+
+
+def clean_transcript(text: str) -> str:
+    """
+    Remove a stray opening or closing quotation mark.
+
+    A handful of LJSpeech rows begin with an unclosed ``"`` that continues
+    onto the next row.  Keeping it would teach the model to say a quotation
+    mark, so an *unmatched* surrounding quote is removed.  Balanced quotes
+    (for example ``"hello," she said``) are left untouched.
+    """
+
+    text = text.strip()
+
+    if text.count('"') != 1:
+        return text
+
+    if text.startswith('"'):
+        return text[1:].strip()
+
+    if text.endswith('"'):
+        return text[:-1].strip()
+
+    return text
 
 
 class LJSpeechDataset(Dataset):
@@ -105,6 +129,24 @@ class LJSpeechDataset(Dataset):
                 if not text.strip():
                     text = columns[1]
 
+                text = clean_transcript(text)
+
+                # The vocabulary is fixed at load time: reject (or skip)
+                # rows whose transcript the model could never encode.
+                unsupported = get_unsupported_characters(text)
+
+                if unsupported:
+                    message = (
+                        f"Unsupported characters {unsupported} in "
+                        f"transcript at line {line_number}"
+                    )
+
+                    if strict:
+                        raise ValueError(message)
+
+                    self.skipped.append(f"line {line_number}: {message}")
+                    continue
+
                 audio_path = self.wavs_dir / f"{audio_id}.wav"
 
                 if not audio_path.is_file():
@@ -132,7 +174,8 @@ class LJSpeechDataset(Dataset):
 
         if self.skipped:
             warnings.warn(
-                f"{len(self.skipped)} audio files were missing and skipped.",
+                f"{len(self.skipped)} dataset rows were skipped "
+                "(missing audio or unsupported transcript characters).",
                 stacklevel=2,
             )
 

@@ -154,3 +154,57 @@ def test_dataset_rejects_invalid_limits(tmp_path):
 
     with pytest.raises(ValueError, match="Maximum Mel frames"):
         LJSpeechDataset(metadata_path, max_mel_frames=0)
+
+
+def test_clean_transcript_strips_unmatched_quote():
+    from voiceforge.dataset import clean_transcript
+
+    assert clean_transcript('"an unclosed quotation,') == "an unclosed quotation,"
+    assert clean_transcript('a trailing quotation,"') == "a trailing quotation,"
+
+
+def test_clean_transcript_keeps_balanced_quotes():
+    from voiceforge.dataset import clean_transcript
+
+    text = '"hello," she said'
+
+    assert clean_transcript(text) == text
+
+
+def test_dataset_cleans_unmatched_quote_from_real_row_shape(tmp_path):
+    """LJSpeech has rows shaped like ``id|"text|"text`` (unclosed quote)."""
+
+    metadata_path = create_test_dataset(tmp_path)
+
+    with metadata_path.open("a", encoding="utf-8") as file:
+        file.write('LJ001-0001|"a quoted line,|"a quoted line,\n')
+
+    dataset = LJSpeechDataset(metadata_path)
+
+    text = dataset.samples[-1][0]
+
+    assert '"' not in text
+    assert text.startswith("a quoted line")
+
+
+def test_dataset_rejects_unsupported_transcript_when_strict(tmp_path):
+    metadata_path = create_test_dataset(tmp_path)
+
+    with metadata_path.open("a", encoding="utf-8") as file:
+        file.write("LJ001-0001|Numbers 123|numbers 123\n")
+
+    with pytest.raises(ValueError, match="Unsupported characters"):
+        LJSpeechDataset(metadata_path)
+
+
+def test_dataset_skips_unsupported_transcript_when_not_strict(tmp_path):
+    metadata_path = create_test_dataset(tmp_path)
+
+    with metadata_path.open("a", encoding="utf-8") as file:
+        file.write("LJ001-0001|Numbers 123|numbers 123\n")
+
+    with pytest.warns(UserWarning, match="skipped"):
+        dataset = LJSpeechDataset(metadata_path, strict=False)
+
+    assert len(dataset) == 1
+    assert any("Unsupported" in entry for entry in dataset.skipped)

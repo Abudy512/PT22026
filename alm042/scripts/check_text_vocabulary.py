@@ -37,11 +37,11 @@ def main():
 
         for row_number, row in enumerate(reader, start=1):
             if len(row) < 3:
-               print(
-                f"Skipping malformed row: {row_number} "
-                f"(columns={len(row)}): {row!r}"
-                    )
-            continue
+                print(
+                    f"Skipping malformed row: {row_number} "
+                    f"(columns={len(row)}): {row!r}"
+                )
+                continue
 
             # Use the normalized transcript, matching the dataset loader.
             text = normalize_text(row[2])

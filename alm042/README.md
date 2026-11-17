@@ -30,7 +30,7 @@ VoiceForge is a university project with **two speech engines**:
 | Main engine | Kokoro-82M (pretrained, Apache-2.0) |
 | Custom model | Tacotron-lite, 2,997,410 parameters |
 | Dataset (custom model) | LJSpeech 1.1 (13,100 clips, single speaker, 22,050 Hz) |
-| Tests | 194 automated tests (1 optional Kokoro test skipped by default) |
+| Tests | pytest suite removed from this snapshot (recoverable from Git history) |
 
 ---
 
@@ -100,9 +100,6 @@ VoiceForge solves this with its own attention-based acoustic model:
   `from voiceforge.kokoro_backend import KokoroBackend`.
 - **Objective evaluation tools** — Mel error, duration error, spectral detail,
   vocoder round-trip and audio defect detection.
-- **194 automated tests** covering text, audio, dataset, model, checkpointing,
-  training, generation, evaluation, both engines, the application and the
-  public API.
 
 ## 3. How it works
 
@@ -165,7 +162,7 @@ alm042/
 │   ├── evaluate.py               # Objective model evaluation
 │   ├── generate.py               # Command-line speech generation
 │   └── train.py                  # Training entry point
-├── tests/                        # 194 automated tests
+├── tests/                        # (removed at the author's request; in Git history)
 └── voiceforge/
     ├── __init__.py               # Public API
     ├── app_core.py               # Application logic (shared by UIs)
@@ -452,26 +449,24 @@ Summary of the measured comparison (identical 64 held-out samples):
 
 ## 12. Testing
 
+The automated pytest suite (18 files, 198 passing tests) was **removed from
+the working tree at the author's request** and is no longer part of this
+repository snapshot. It remains available in the Git history if it is needed
+again:
+
 ```bash
+git checkout 84ba9f6 -- tests
 python -m pytest tests -q
 ```
 
-```
-194 passed, 1 skipped
-```
-
-The suite covers text processing, audio analysis and reconstruction, dataset
-parsing and filtering, model shapes and masking, checkpoint round-trips and
-architecture dispatch, the training loop, generation, evaluation metrics,
-audio defect detection, both speech engines, the web application (through a
-real HTTP server, including downloads and error responses) and the public API.
-
-Tests that need the LJSpeech dataset skip automatically when it is absent. The
-one optional test that performs real Kokoro generation runs only with:
+Verification of the current code is done through the application and the
+command-line tools:
 
 ```bash
-set VOICEFORGE_TEST_KOKORO=1
-python -m pytest tests/test_kokoro_backend.py -q
+python app.py --engine kokoro        # generate and listen
+python app.py --engine voiceforge    # custom model
+python -m scripts.generate "Hello." --output outputs/hello.wav
+python -m scripts.check_audio --checkpoint checkpoints/voiceforge_attn.pt
 ```
 
 ## 13. Known limitations

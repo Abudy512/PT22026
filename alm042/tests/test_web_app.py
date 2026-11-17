@@ -68,10 +68,10 @@ def test_index_page_is_served(server):
     assert "VoiceForge" in body
     assert "Generate Speech" in body
     assert "Download WAV" in body
-    # The engine description and the honesty notice must be visible.
-    assert "Kokoro" in body
-    assert "not expected to be" in body and "intelligible" in body
+    # Engine selection and the pretrained-model attribution must be present.
     assert "Speech engine" in body
+    assert "Kokoro" in body
+    assert "Apache-2.0" in body
 
 
 def test_health_endpoint(server):

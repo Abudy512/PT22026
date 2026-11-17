@@ -15,6 +15,7 @@ mixed precision.
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -85,6 +86,7 @@ def compute_losses(
     guided_attention_weight: float = 0.5,
     stop_weight: float = 1.0,
     duration_weight: float = 0.1,
+    guided_attention_sigma: float = 0.4,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
     Compute the training loss for one batch and return per-term values.
@@ -130,6 +132,7 @@ def compute_losses(
         attention_loss = guided_attention_loss(
             output["attention"],
             text_lengths,
+            sigma=guided_attention_sigma,
         )
 
         total = (
@@ -176,6 +179,38 @@ def compute_losses(
     return total, terms
 
 
+def _build_scheduler(
+    optimizer: torch.optim.Optimizer,
+    total_steps: int,
+    warmup_steps: int,
+    peak_learning_rate: float,
+    minimum_learning_rate: float,
+):
+    """
+    Linear warm-up followed by cosine decay to ``minimum_learning_rate``.
+
+    Warm-up avoids large early updates while the attention is still random;
+    the cosine tail lets the model settle instead of oscillating around the
+    optimum at a constant learning rate.
+    """
+
+    warmup = max(int(warmup_steps), 0)
+    floor = min(max(minimum_learning_rate / peak_learning_rate, 0.0), 1.0)
+
+    def factor(step: int) -> float:
+        if warmup > 0 and step < warmup:
+            return (step + 1) / warmup
+
+        progress = (step - warmup) / max(total_steps - warmup, 1)
+        progress = min(max(progress, 0.0), 1.0)
+
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        return floor + (1.0 - floor) * cosine
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
+
+
 def _save_checkpoint(
     path: str | Path,
     model: nn.Module,
@@ -184,6 +219,7 @@ def _save_checkpoint(
     train_loss: float,
     val_loss: float | None,
     history: list[dict[str, Any]],
+    extra_metadata: dict[str, Any] | None = None,
 ) -> Path:
     """Write a checkpoint that can rebuild the model exactly."""
 
@@ -198,6 +234,9 @@ def _save_checkpoint(
         "model_config": get_model_config(model),
         "history": history,
     }
+
+    if extra_metadata:
+        payload["training_config"] = dict(extra_metadata)
 
     if val_loss is not None:
         payload["val_loss"] = val_loss
@@ -218,6 +257,7 @@ def evaluate_validation(
     guided_attention_weight: float = 0.5,
     stop_weight: float = 1.0,
     duration_weight: float = 0.1,
+    guided_attention_sigma: float = 0.4,
 ) -> float:
     """Return the mean validation loss without updating any weights."""
 
@@ -234,6 +274,7 @@ def evaluate_validation(
                 guided_attention_weight=guided_attention_weight,
                 stop_weight=stop_weight,
                 duration_weight=duration_weight,
+                guided_attention_sigma=guided_attention_sigma,
             )
             total += float(loss)
             batches += 1
@@ -258,10 +299,14 @@ def train_model(
     guided_attention_weight: float = 0.5,
     stop_weight: float = 1.0,
     duration_weight: float = 0.1,
+    guided_attention_sigma: float = 0.4,
     grad_clip: float = 1.0,
     amp: bool = False,
     seed: int | None = None,
     log_every: int = 0,
+    warmup_steps: int = 0,
+    min_learning_rate: float | None = None,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> list[float]:
     """
     Train ``model`` and return the average training loss of every epoch.
@@ -311,6 +356,29 @@ def train_model(
     use_amp = bool(amp and device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
+    # Optional warm-up + cosine decay.  With no warm-up and no minimum the
+    # learning rate stays constant, which keeps the old behaviour.
+    scheduler = None
+
+    if warmup_steps > 0 or min_learning_rate is not None:
+        try:
+            total_steps = epochs * len(dataloader)
+        except TypeError:
+            total_steps = 0
+
+        if total_steps > 0:
+            scheduler = _build_scheduler(
+                optimizer,
+                total_steps=total_steps,
+                warmup_steps=warmup_steps,
+                peak_learning_rate=learning_rate,
+                minimum_learning_rate=(
+                    min_learning_rate
+                    if min_learning_rate is not None
+                    else learning_rate * 0.1
+                ),
+            )
+
     history: list[dict[str, Any]] = []
     epoch_losses: list[float] = []
 
@@ -337,6 +405,7 @@ def train_model(
                         guided_attention_weight=guided_attention_weight,
                         stop_weight=stop_weight,
                         duration_weight=duration_weight,
+                        guided_attention_sigma=guided_attention_sigma,
                     )
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
@@ -351,10 +420,14 @@ def train_model(
                     guided_attention_weight=guided_attention_weight,
                     stop_weight=stop_weight,
                     duration_weight=duration_weight,
+                    guided_attention_sigma=guided_attention_sigma,
                 )
                 loss.backward()
                 clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                 optimizer.step()
+
+            if scheduler is not None:
+                scheduler.step()
 
             if not torch.isfinite(loss):
                 raise ValueError("Training loss is not finite")
@@ -394,6 +467,7 @@ def train_model(
                 guided_attention_weight=guided_attention_weight,
                 stop_weight=stop_weight,
                 duration_weight=duration_weight,
+                guided_attention_sigma=guided_attention_sigma,
             )
 
         entry = {
@@ -403,6 +477,7 @@ def train_model(
             if validation_loss is not None
             else None,
             "seconds": round(time.time() - start, 1),
+            "learning_rate": round(optimizer.param_groups[0]["lr"], 8),
             "terms": {
                 key: round(value / batch_count, 6)
                 for key, value in term_totals.items()
@@ -440,6 +515,7 @@ def train_model(
                     average_loss,
                     validation_loss,
                     history,
+                    extra_metadata=extra_metadata,
                 )
 
         if history_path is not None:

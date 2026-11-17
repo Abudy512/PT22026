@@ -33,9 +33,9 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from voiceforge.architectures import ARCH_LEGACY, ARCH_TACOTRON
-from voiceforge.batching import collate_batch
+from voiceforge.batching import LengthBucketSampler, collate_batch
 from voiceforge.checkpoint import build_model, load_model
-from voiceforge.dataset import LJSpeechDataset
+from voiceforge.dataset import CachedMelDataset, LJSpeechDataset
 from voiceforge.model import ModelConfig
 from voiceforge.text import CHAR_TO_ID
 from voiceforge.training import train_model
@@ -75,11 +75,62 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--embedding-dim", type=int, default=128)
     parser.add_argument("--attention-dim", type=int, default=128)
     parser.add_argument("--guided-weight", type=float, default=0.5)
+    parser.add_argument("--guided-sigma", type=float, default=0.4,
+                        help="Width of the guided-attention diagonal band.")
+    parser.add_argument("--warmup-steps", type=int, default=0,
+                        help="Linear learning-rate warm-up steps (0 = off).")
+    parser.add_argument("--min-lr", type=float, default=None,
+                        help="Final learning rate of the cosine decay.")
+    parser.add_argument("--cache-dir", default="",
+                        help="Cache log-Mel tensors here ('' disables).")
+    parser.add_argument("--no-bucket", action="store_true",
+                        help="Disable length-bucketed batch construction.")
+    parser.add_argument("--keep-awake", action="store_true",
+                        help="Stop Windows from sleeping during training.")
     parser.add_argument("--amp", action="store_true",
                         help="Enable CUDA mixed precision.")
     parser.add_argument("--log-every", type=int, default=50)
 
     return parser
+
+
+def keep_system_awake() -> bool:
+    """
+    Best-effort request that Windows keeps this session awake.
+
+    A long training run is easily killed by the machine going to sleep, and
+    the request is per-process, so it does not change any system settings.
+    Returns True when the request was made.
+    """
+
+    if sys.platform != "win32":
+        return False
+
+    try:
+        import ctypes
+
+        ES_CONTINUOUS = 0x80000000
+        ES_SYSTEM_REQUIRED = 0x00000001
+
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+        )
+        return True
+    except Exception:
+        return False
+
+
+def audio_lengths(dataset: LJSpeechDataset, indices: list[int]) -> list[int]:
+    """Mel-frame length of every selected row, without decoding audio."""
+
+    lengths = []
+
+    for index in indices:
+        _, audio_path = dataset.samples[index]
+        duration = sf.info(str(audio_path)).duration
+        lengths.append(max(4, round(duration * 22050 / 256)))
+
+    return lengths
 
 
 def select_indices(
@@ -151,6 +202,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.log_every < 0:
         raise ValueError("--log-every cannot be negative")
 
+    if args.warmup_steps < 0:
+        raise ValueError("--warmup-steps cannot be negative")
+
+    if args.keep_awake and not keep_system_awake():
+        print("Note: could not request keep-awake on this platform.")
+
     metadata_path = Path(args.metadata)
 
     if not metadata_path.is_file():
@@ -189,19 +246,56 @@ def main(argv: list[str] | None = None) -> int:
         f"max clip length: {args.max_seconds or 'unlimited'} s"
     )
 
-    train_loader = DataLoader(
-        Subset(dataset, train_indices),
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=0,
-        collate_fn=collate_batch,
-        # A final batch of one sample would break BatchNorm in training mode.
-        drop_last=len(train_indices) >= args.batch_size,
-    )
+    # Optional on-disk Mel cache.  It wraps the base dataset before the
+    # Subset so indices stay absolute, and it changes nothing about the data
+    # itself - only how often the spectrogram is computed.
+    cached_dataset = dataset
+
+    if args.cache_dir:
+        cached_dataset = CachedMelDataset(
+            dataset,
+            args.cache_dir,
+            verbose=True,
+        )
+        print(f"Mel cache: {cached_dataset.cache_dir}")
+
+    train_subset = Subset(cached_dataset, train_indices)
+
+    if args.no_bucket or len(train_indices) < args.batch_size:
+        train_loader = DataLoader(
+            train_subset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=0,
+            collate_fn=collate_batch,
+            # A final batch of one sample would break BatchNorm.
+            drop_last=len(train_indices) >= args.batch_size,
+        )
+    else:
+        lengths = audio_lengths(dataset, train_indices)
+
+        sampler = LengthBucketSampler(
+            lengths,
+            batch_size=args.batch_size,
+            seed=args.seed,
+            drop_last=True,
+        )
+
+        train_loader = DataLoader(
+            train_subset,
+            batch_sampler=sampler,
+            num_workers=0,
+            collate_fn=collate_batch,
+        )
+
+        print(
+            f"Length-bucketed batches: mean "
+            f"{sum(lengths) / len(lengths):.0f} frames"
+        )
 
     val_loader = (
         DataLoader(
-            Subset(dataset, val_indices),
+            Subset(cached_dataset, val_indices),
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=0,
@@ -248,6 +342,37 @@ def main(argv: list[str] | None = None) -> int:
         f"epochs: {args.epochs} | batch size: {args.batch_size}"
     )
 
+    training_config = {
+        "dataset": str(metadata_path),
+        "train_samples": len(train_indices),
+        "val_samples": len(val_indices),
+        "batch_size": args.batch_size,
+        "epochs": args.epochs,
+        "learning_rate": args.learning_rate,
+        "warmup_steps": args.warmup_steps,
+        "min_learning_rate": args.min_lr,
+        "guided_attention_weight": args.guided_weight,
+        "guided_attention_sigma": args.guided_sigma,
+        "max_seconds": args.max_seconds,
+        "max_frames": args.max_frames,
+        "seed": args.seed,
+        "bucketed_batches": not args.no_bucket,
+        "mel_cache": str(args.cache_dir) if args.cache_dir else None,
+        "device": str(device),
+        # str() is required: torch.__version__ is a TorchVersion object,
+        # which cannot be loaded back with weights_only=True.
+        "torch": str(torch.__version__),
+    }
+
+    print(
+        f"Learning rate: {args.learning_rate} "
+        f"(warm-up {args.warmup_steps} steps, min {args.min_lr})"
+    )
+    print(
+        f"Guided attention: weight {args.guided_weight}, "
+        f"sigma {args.guided_sigma}"
+    )
+
     started = time.time()
 
     history = train_model(
@@ -260,6 +385,10 @@ def main(argv: list[str] | None = None) -> int:
         validation_dataloader=val_loader,
         history_path=args.history,
         guided_attention_weight=args.guided_weight,
+        guided_attention_sigma=args.guided_sigma,
+        warmup_steps=args.warmup_steps,
+        min_learning_rate=args.min_lr,
+        extra_metadata=training_config,
         amp=args.amp,
         seed=args.seed,
         log_every=args.log_every,

@@ -1,6 +1,83 @@
 
+import random
+from collections.abc import Iterator
+
 import torch
 from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import Sampler
+
+
+class LengthBucketSampler(Sampler[list[int]]):
+    """
+    Build batches out of samples with similar lengths.
+
+    A batch is padded to its longest sample, so pairing a 600-frame clip with
+    150-frame clips wastes most of the compute in that batch.  Sorting by
+    length and shuffling inside a buffer of several batches removes most of
+    that padding waste while keeping batch composition varied between epochs.
+
+    ``lengths[i]`` is the Mel length of dataset sample ``i`` (for example
+    ``duration * 22050 / 256``).
+    """
+
+    def __init__(
+        self,
+        lengths,
+        batch_size: int,
+        buffer_batches: int = 8,
+        shuffle: bool = True,
+        drop_last: bool = True,
+        seed: int = 0,
+    ):
+        if batch_size < 1:
+            raise ValueError("Batch size must be at least 1")
+
+        self.lengths = [int(length) for length in lengths]
+        self.batch_size = int(batch_size)
+        self.buffer_batches = max(1, int(buffer_batches))
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        self.seed = seed
+        self.epoch = 0
+
+    def __len__(self) -> int:
+        total = len(self.lengths)
+
+        if self.drop_last:
+            return total // self.batch_size
+
+        return (total + self.batch_size - 1) // self.batch_size
+
+    def __iter__(self) -> Iterator[list[int]]:
+        rng = random.Random(self.seed + self.epoch)
+        self.epoch += 1
+
+        order = sorted(
+            range(len(self.lengths)),
+            key=lambda index: self.lengths[index],
+        )
+
+        group_size = self.batch_size * self.buffer_batches
+        batches: list[list[int]] = []
+
+        for start in range(0, len(order), group_size):
+            chunk = order[start:start + group_size]
+
+            if self.shuffle:
+                rng.shuffle(chunk)
+
+            for offset in range(0, len(chunk), self.batch_size):
+                batch = chunk[offset:offset + self.batch_size]
+
+                if len(batch) < self.batch_size and self.drop_last:
+                    continue
+
+                batches.append(batch)
+
+        if self.shuffle:
+            rng.shuffle(batches)
+
+        yield from batches
 
 
 def collate_batch(samples):

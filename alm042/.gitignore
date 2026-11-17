@@ -8,6 +8,7 @@ venv/
 
 # Test and tool caches
 .pytest_cache/
+pytest-of-*/
 *.egg-info/
 
 # Datasets (large, downloaded separately)

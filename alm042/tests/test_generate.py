@@ -10,36 +10,48 @@ import soundfile as sf
 import torch
 
 from scripts.generate import build_parser, generate, main
+from voiceforge.checkpoint import get_model_config
 from voiceforge.model import AcousticModel
+from voiceforge.model_legacy import LegacyAcousticModel
 from voiceforge.text import CHAR_TO_ID
 
 VOCAB_SIZE = len(CHAR_TO_ID)
 
 
-def write_checkpoint(path, with_config=True):
+def write_checkpoint(path, legacy=False):
     """Create a small, untrained checkpoint that loads quickly."""
 
-    model = AcousticModel(
-        vocab_size=VOCAB_SIZE,
-        n_mels=80,
-        embedding_dim=16,
-        hidden_dim=16,
-    )
+    if legacy:
+        model = LegacyAcousticModel(
+            vocab_size=VOCAB_SIZE,
+            n_mels=80,
+            embedding_dim=16,
+            hidden_dim=16,
+        )
+        checkpoint = {
+            "epoch": 1,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": {},
+            "loss": 1.0,
+        }
+    else:
+        model = AcousticModel(
+            vocab_size=VOCAB_SIZE,
+            n_mels=80,
+            embedding_dim=16,
+            hidden_dim=16,
+            attention_dim=8,
+        )
+        # Bias the duration predictor so about 20 frames are generated.
+        with torch.no_grad():
+            model.duration_projection[2].bias.fill_(3.0)
 
-    checkpoint = {
-        "epoch": 1,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": {},
-        "loss": 1.0,
-    }
-
-    if with_config:
-        checkpoint["model_config"] = {
-            "architecture": "legacy_interpolate",
-            "vocab_size": VOCAB_SIZE,
-            "n_mels": 80,
-            "embedding_dim": 16,
-            "hidden_dim": 16,
+        checkpoint = {
+            "epoch": 1,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": {},
+            "loss": 1.0,
+            "model_config": get_model_config(model),
         }
 
     torch.save(checkpoint, path)
@@ -243,7 +255,7 @@ def test_generate_reads_text_file(tmp_path):
 def test_generate_loads_legacy_checkpoint_without_config(tmp_path):
     """Old checkpoints predate ``model_config`` and must still load."""
 
-    checkpoint = write_checkpoint(tmp_path / "legacy.pt", with_config=False)
+    checkpoint = write_checkpoint(tmp_path / "legacy.pt", legacy=True)
     args = make_args(tmp_path, checkpoint)
 
     summaries = generate(args)

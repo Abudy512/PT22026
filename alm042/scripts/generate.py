@@ -31,7 +31,7 @@ import torch
 from voiceforge.audio import SAMPLE_RATE
 from voiceforge.tts import VoiceForgeTTS
 
-DEFAULT_CHECKPOINT = "checkpoints/voiceforge.pt"
+DEFAULT_CHECKPOINT = "checkpoints/voiceforge_attn.pt"
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -1,40 +1,133 @@
+"""Train the VoiceForge acoustic model.
+
+Examples
+--------
+Quick smoke test (a few minutes)::
+
+    python -m scripts.train --max-samples 128 --epochs 1 --batch-size 16
+
+Real training run::
+
+    python -m scripts.train \
+        --epochs 20 \
+        --batch-size 64 \
+        --max-seconds 5 \
+        --max-samples 6000 \
+        --checkpoint checkpoints/voiceforge_attn.pt \
+        --history outputs/training_history.json
+
+The script never overwrites the baseline checkpoint unless you point
+``--checkpoint`` at it explicitly.
+"""
+
+from __future__ import annotations
 
 import argparse
+import json
+import sys
+import time
 from pathlib import Path
 
+import soundfile as sf
 import torch
 from torch.utils.data import DataLoader, Subset
 
+from voiceforge.architectures import ARCH_TACOTRON
 from voiceforge.batching import collate_batch
 from voiceforge.dataset import LJSpeechDataset
-from voiceforge.model import AcousticModel
+from voiceforge.model import AcousticModel, ModelConfig
 from voiceforge.text import CHAR_TO_ID
 from voiceforge.training import train_model
 
+DEFAULT_METADATA = "data/LJSpeech-1.1/LJSpeech-1.1/metadata.csv"
 
-def main():
+# The evaluator always uses the last 64 rows of metadata.csv.  Training must
+# never select them, otherwise the "held-out" numbers stop being held out.
+EVALUATION_WINDOW = 64
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train the VoiceForge acoustic model."
+        description="Train the VoiceForge acoustic model.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    parser.add_argument(
-        "--metadata",
-        type=str,
-        default="data/LJSpeech-1.1/LJSpeech-1.1/metadata.csv",
-    )
-
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--metadata", default=DEFAULT_METADATA)
+    parser.add_argument("--arch", default=ARCH_TACOTRON,
+                        choices=[ARCH_TACOTRON, "legacy_interpolate"])
+    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=0.001)
-    parser.add_argument("--max-samples", type=int, default=0)
+    parser.add_argument("--max-samples", type=int, default=0,
+                        help="Training samples to use (0 = everything).")
+    parser.add_argument("--val-samples", type=int, default=64,
+                        help="Held-out samples used for validation.")
+    parser.add_argument("--max-seconds", type=float, default=0.0,
+                        help="Keep only clips shorter than this (0 = no limit).")
+    parser.add_argument("--max-frames", type=int, default=0,
+                        help="Truncate Mel spectrograms to this many frames.")
+    parser.add_argument("--checkpoint", default="checkpoints/voiceforge_attn.pt")
+    parser.add_argument("--history", default="outputs/training_history.json")
+    parser.add_argument("--device", default=None, choices=["cpu", "cuda"])
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--hidden-dim", type=int, default=256)
+    parser.add_argument("--embedding-dim", type=int, default=128)
+    parser.add_argument("--attention-dim", type=int, default=128)
+    parser.add_argument("--guided-weight", type=float, default=0.5)
+    parser.add_argument("--amp", action="store_true",
+                        help="Enable CUDA mixed precision.")
+    parser.add_argument("--log-every", type=int, default=50)
 
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default="checkpoints/voiceforge.pt",
-    )
+    return parser
 
-    args = parser.parse_args()
+
+def select_indices(
+    dataset: LJSpeechDataset,
+    train_count: int,
+    val_count: int,
+    max_seconds: float,
+) -> tuple[list[int], list[int]]:
+    """
+    Choose training and validation rows by original metadata position.
+
+    Selecting by row index (instead of filtering the dataset first) keeps the
+    identity of each row, so the evaluator's held-out window can never be
+    used for training.
+    """
+
+    selected: list[int] = []
+
+    for index, (_, audio_path) in enumerate(dataset.samples):
+        if max_seconds > 0:
+            duration = sf.info(str(audio_path)).duration
+            if duration > max_seconds:
+                continue
+
+        selected.append(index)
+
+        if len(selected) >= train_count + val_count:
+            break
+
+    limit = len(dataset) - EVALUATION_WINDOW
+
+    if selected and max(selected) >= limit:
+        raise ValueError(
+            "Selected training rows overlap the evaluator's held-out "
+            f"window (index {limit} and above). Use fewer samples or a "
+            "shorter --max-seconds."
+        )
+
+    if len(selected) < train_count:
+        raise ValueError(
+            f"Only {len(selected)} rows matched the filters, "
+            f"but --max-samples is {train_count}."
+        )
+
+    return selected[:train_count], selected[train_count:train_count + val_count]
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     if args.batch_size < 1:
         raise ValueError("Batch size must be at least 1")
@@ -45,65 +138,149 @@ def main():
     if args.max_samples < 0:
         raise ValueError("Maximum samples cannot be negative")
 
+    if args.max_frames < 0:
+        raise ValueError("Maximum frames cannot be negative")
+
     metadata_path = Path(args.metadata)
 
     if not metadata_path.is_file():
-        raise FileNotFoundError(
-            f"Metadata file not found: {metadata_path}"
-        )
+        raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
+
+    device = torch.device(
+        args.device
+        if args.device is not None
+        else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
 
     print("Loading LJSpeech dataset...")
 
-    dataset = LJSpeechDataset(metadata_path)
+    dataset = LJSpeechDataset(
+        metadata_path,
+        max_mel_frames=args.max_frames or None,
+        strict=False,
+    )
 
-    print(f"Available samples: {len(dataset)}")
+    print(f"Rows in metadata: {len(dataset)}")
 
-    if args.max_samples > 0:
-        sample_count = min(args.max_samples, len(dataset))
-        dataset = Subset(dataset, range(sample_count))
-        print(f"Using a subset of {sample_count} samples")
-    else:
-        print("Using the complete dataset")
+    total_rows = len(dataset) - EVALUATION_WINDOW
+    train_count = min(args.max_samples, total_rows) if args.max_samples else total_rows
+    val_count = min(args.val_samples, max(total_rows - train_count, 0))
 
-    dataloader = DataLoader(
+    train_indices, val_indices = select_indices(
         dataset,
+        train_count,
+        val_count,
+        args.max_seconds,
+    )
+
+    print(
+        f"Training samples: {len(train_indices)} | "
+        f"validation samples: {len(val_indices)} | "
+        f"max clip length: {args.max_seconds or 'unlimited'} s"
+    )
+
+    train_loader = DataLoader(
+        Subset(dataset, train_indices),
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=0,
         collate_fn=collate_batch,
+        # A final batch of one sample would break BatchNorm in training mode.
+        drop_last=len(train_indices) >= args.batch_size,
     )
 
-    model = AcousticModel(
-        vocab_size=len(CHAR_TO_ID),
-        n_mels=80,
-        embedding_dim=128,
-        hidden_dim=128,
+    val_loader = (
+        DataLoader(
+            Subset(dataset, val_indices),
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=collate_batch,
+        )
+        if val_indices
+        else None
     )
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if args.arch == ARCH_TACOTRON:
+        config = ModelConfig(
+            vocab_size=len(CHAR_TO_ID),
+            n_mels=80,
+            embedding_dim=args.embedding_dim,
+            hidden_dim=args.hidden_dim,
+            attention_dim=args.attention_dim,
+        )
+        model = AcousticModel(
+            vocab_size=config.vocab_size,
+            n_mels=config.n_mels,
+            embedding_dim=config.embedding_dim,
+            hidden_dim=config.hidden_dim,
+            attention_dim=config.attention_dim,
+        )
+    else:
+        from voiceforge.model_legacy import LegacyAcousticModel
 
-    if device == "cuda":
+        config = None
+        model = LegacyAcousticModel(vocab_size=len(CHAR_TO_ID))
+
+    parameters = sum(p.numel() for p in model.parameters())
+
+    print(f"Architecture: {args.arch}")
+    print(f"Parameters: {parameters:,}")
+    print(f"Device: {device}")
+
+    if device.type == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)}")
+        torch.cuda.reset_peak_memory_stats()
 
-    print(f"Training device: {device}")
-    print("Starting VoiceForge training...")
+    print(
+        f"Batches per epoch: {len(train_loader)} | "
+        f"epochs: {args.epochs} | batch size: {args.batch_size}"
+    )
+
+    started = time.time()
 
     history = train_model(
         model=model,
-        dataloader=dataloader,
+        dataloader=train_loader,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
-        device=device,
+        device=str(device),
         checkpoint_path=args.checkpoint,
+        validation_dataloader=val_loader,
+        history_path=args.history,
+        guided_attention_weight=args.guided_weight,
+        amp=args.amp,
+        seed=args.seed,
+        log_every=args.log_every,
     )
 
+    elapsed = time.time() - started
+
+    if device.type == "cuda":
+        print(
+            f"Peak GPU memory: "
+            f"{torch.cuda.max_memory_allocated() / 1e9:.2f} GB"
+        )
+
     print("\nTraining completed.")
+    print(f"Total time: {elapsed / 60:.1f} minutes")
 
     for index, loss in enumerate(history, start=1):
         print(f"Epoch {index}: loss = {loss:.4f}")
 
-    print(f"Checkpoint saved to: {args.checkpoint}")
+    print(f"Checkpoint: {args.checkpoint}")
+    print(f"History: {args.history}")
+
+    if Path(args.history).is_file():
+        entries = json.loads(Path(args.history).read_text(encoding="utf-8"))
+        print(json.dumps(entries[-1], indent=2))
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        raise SystemExit(main())
+    except (FileNotFoundError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        raise SystemExit(1)

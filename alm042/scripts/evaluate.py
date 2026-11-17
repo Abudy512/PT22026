@@ -55,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--checkpoint",
-        default="checkpoints/voiceforge.pt",
+        default="checkpoints/voiceforge_attn.pt",
         help="Checkpoint to evaluate.",
     )
     parser.add_argument(

@@ -18,7 +18,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from voiceforge.checkpoint import get_model_config  # noqa: E402
 from voiceforge.model import AcousticModel  # noqa: E402
+from voiceforge.model_legacy import LegacyAcousticModel  # noqa: E402
 from voiceforge.text import CHAR_TO_ID  # noqa: E402
 
 VOCAB_SIZE = len(CHAR_TO_ID)
@@ -31,13 +33,14 @@ SENTENCES = [
 
 
 def build_tiny_model(embedding_dim: int = 8, hidden_dim: int = 8) -> AcousticModel:
-    """Create a very small model so tests stay fast."""
+    """Create a very small attention model so tests stay fast."""
 
     model = AcousticModel(
         vocab_size=VOCAB_SIZE,
         n_mels=80,
         embedding_dim=embedding_dim,
         hidden_dim=hidden_dim,
+        attention_dim=8,
     )
 
     # Make the duration predictor output roughly 20 frames instead of a
@@ -97,7 +100,7 @@ def tiny_dataset(tmp_path):
 
 @pytest.fixture
 def tiny_checkpoint(tmp_path, tiny_model):
-    """Save the tiny model as a checkpoint and return its path."""
+    """Save the tiny attention model as a checkpoint and return its path."""
 
     path = tmp_path / "checkpoints" / "tiny.pt"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,13 +111,35 @@ def tiny_checkpoint(tmp_path, tiny_model):
             "model_state_dict": tiny_model.state_dict(),
             "optimizer_state_dict": {},
             "loss": 1.0,
-            "model_config": {
-                "architecture": "legacy_interpolate",
-                "vocab_size": VOCAB_SIZE,
-                "n_mels": 80,
-                "embedding_dim": 8,
-                "hidden_dim": 8,
-            },
+            "model_config": get_model_config(tiny_model),
+        },
+        path,
+    )
+
+    return path
+
+
+@pytest.fixture
+def tiny_legacy_checkpoint(tmp_path):
+    """Save a tiny *baseline* model as an old-style checkpoint."""
+
+    model = LegacyAcousticModel(
+        vocab_size=VOCAB_SIZE,
+        n_mels=80,
+        embedding_dim=8,
+        hidden_dim=8,
+    )
+
+    path = tmp_path / "checkpoints" / "legacy.pt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Deliberately no model_config: this mimics the real old checkpoint.
+    torch.save(
+        {
+            "epoch": 1,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": {},
+            "loss": 1.0,
         },
         path,
     )

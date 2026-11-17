@@ -54,6 +54,64 @@ def kokoro_is_installed() -> bool:
     return importlib.util.find_spec("kokoro") is not None
 
 
+def _default_cache_dir() -> Path:
+    """Hugging Face's cache location when ``HF_HOME`` is unset."""
+
+    configured = os.environ.get("HF_HOME")
+
+    if configured:
+        return Path(configured)
+
+    return Path.home() / ".cache" / "huggingface"
+
+
+def _is_writable(path: Path) -> bool:
+    """True when ``path`` can be created and written to."""
+
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".voiceforge_write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def configure_cache(cache_dir: str | Path = "outputs/hf") -> str | None:
+    """
+    Make sure Hugging Face has a writable cache directory.
+
+    Some Windows accounts (and sandboxed environments) cannot write to
+    ``~/.cache/huggingface``, which makes the weight download fail with
+    ``WinError 5``.  When the default location is not writable and the user
+    has not set ``HF_HOME`` explicitly, this points Hugging Face at a
+    project-local folder instead.
+
+    Returns the cache directory that was selected, or ``None`` when the
+    default was already writable.  Must be called before importing
+    ``kokoro``/``huggingface_hub``, because they read the environment once.
+    """
+
+    if os.environ.get("HF_HOME"):
+        # The user made an explicit choice - respect it.
+        return os.environ["HF_HOME"]
+
+    default = _default_cache_dir()
+
+    if _is_writable(default):
+        return None
+
+    target = Path(cache_dir).expanduser().resolve()
+    target.mkdir(parents=True, exist_ok=True)
+
+    os.environ["HF_HOME"] = str(target)
+    os.environ.setdefault("HF_HUB_CACHE", str(target / "hub"))
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+    return str(target)
+
+
 class KokoroBackend:
     """
     Thin wrapper around :class:`kokoro.KPipeline`.
@@ -86,6 +144,7 @@ class KokoroBackend:
         self.requested_device = device
 
         self._pipeline = None
+        self._cache_dir: str | None = None
 
     @property
     def is_loaded(self) -> bool:
@@ -115,6 +174,9 @@ class KokoroBackend:
                 "prompted), then restart the application."
             )
 
+        # Must run before kokoro imports huggingface_hub.
+        self._cache_dir = configure_cache()
+
         try:
             from kokoro import KPipeline
 
@@ -128,11 +190,17 @@ class KokoroBackend:
                 device=device,
             )
         except Exception as error:  # noqa: BLE001 - surfaced to the user
+            hint = (
+                f" A writable cache was selected at {self._cache_dir}."
+                if self._cache_dir
+                else ""
+            )
+
             raise KokoroError(
                 "Kokoro could not be loaded. The pretrained weights are "
                 f"downloaded from Hugging Face ({self.repo_id}); check your "
-                "internet connection, or set HF_ENDPOINT to a mirror. "
-                f"Original error: {error}"
+                "internet connection, or set HF_ENDPOINT to a mirror."
+                f"{hint} Original error: {error}"
             ) from error
 
         return self._pipeline

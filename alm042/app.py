@@ -22,6 +22,7 @@ The interface runs entirely locally: no audio or text leaves the machine.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from voiceforge.app_core import (
@@ -33,7 +34,11 @@ from voiceforge.app_core import (
     AppError,
     VoiceForgeApp,
 )
-from voiceforge.kokoro_backend import DEFAULT_VOICE, KOKORO_VOICES
+from voiceforge.kokoro_backend import (
+    DEFAULT_VOICE,
+    KOKORO_VOICES,
+    configure_cache,
+)
 from voiceforge.web_app import run
 
 DEFAULT_HOST = "127.0.0.1"
@@ -89,6 +94,18 @@ def main(argv: list[str] | None = None) -> int:
     if not 1 <= args.port <= 65535:
         print("ERROR: --port must be between 1 and 65535", file=sys.stderr)
         return 1
+
+    # Some Windows accounts cannot write to the default Hugging Face cache,
+    # which breaks the Kokoro weight download. Select a writable cache
+    # before any Hugging Face import happens.
+    explicit_hf_home = bool(os.environ.get("HF_HOME"))
+    selected_cache = configure_cache()
+
+    if selected_cache and not explicit_hf_home:
+        print(
+            f"Hugging Face cache: {selected_cache} "
+            "(the default cache location is not writable)"
+        )
 
     app = VoiceForgeApp(
         checkpoint_path=args.checkpoint,

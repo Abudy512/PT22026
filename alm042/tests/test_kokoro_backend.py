@@ -58,6 +58,44 @@ def test_sample_rate_is_24khz():
     assert KokoroBackend.SAMPLE_RATE == 24000 == KOKORO_SAMPLE_RATE
 
 
+def test_configure_cache_respects_explicit_hf_home(tmp_path, monkeypatch):
+    explicit = tmp_path / "explicit"
+    monkeypatch.setenv("HF_HOME", str(explicit))
+
+    assert kb.configure_cache(tmp_path / "fallback") == str(explicit)
+
+
+def test_configure_cache_returns_none_when_default_is_writable(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv("HF_HOME", raising=False)
+    monkeypatch.setattr(kb, "_is_writable", lambda path: True)
+
+    assert kb.configure_cache(tmp_path / "local") is None
+
+
+def test_configure_cache_falls_back_when_default_is_not_writable(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv("HF_HOME", raising=False)
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    monkeypatch.setattr(kb, "_is_writable", lambda path: False)
+
+    target = tmp_path / "local"
+    result = kb.configure_cache(target)
+
+    assert result == str(target.resolve())
+    assert os.environ["HF_HOME"] == result
+    assert target.is_dir()
+    assert os.environ["HF_HUB_CACHE"] == str(target.resolve() / "hub")
+
+
+def test_is_writable_detects_a_writable_directory(tmp_path):
+    assert kb._is_writable(tmp_path / "fresh") is True
+
+
 @pytest.mark.skipif(
     not RUN_REAL,
     reason="set VOICEFORGE_TEST_KOKORO=1 to run real Kokoro generation",

@@ -173,3 +173,39 @@ TTS internals; Kokoro is what makes the application useful.
 
 > Kokoro-82M by hexgrad — <https://huggingface.co/hexgrad/Kokoro-82M> —
 > Apache-2.0. Used as a pretrained engine; not trained by this project.
+
+## Troubleshooting
+
+### `WinError 5` / `Access is denied` on the Hugging Face cache
+
+On some Windows accounts (and in sandboxed environments) the default cache
+folder `%USERPROFILE%\.cache\huggingface` cannot be written to, so loading
+the weights fails with:
+
+```
+[WinError 5] Access is denied: 'C:\Users\<you>\.cache\huggingface\hub\...'
+```
+
+The application now checks this automatically before importing Kokoro. If the
+default location is not writable it selects a project-local cache
+(`outputs/hf`, git-ignored) and prints:
+
+```
+Hugging Face cache: ...\alm042\outputs\hf (the default cache location is not writable)
+```
+
+No action is needed. To force a specific location anyway, set `HF_HOME`
+yourself; an explicit value is always respected:
+
+```powershell
+$env:HF_HOME = "D:\hf-cache"
+python app.py
+```
+
+If the weights are not cached yet and `huggingface.co` is unreachable, also
+set `HF_ENDPOINT=https://hf-mirror.com`.
+
+### `HF_TOKEN` warning
+
+"Unauthenticated requests to the HF Hub" is informational; downloading the
+Kokoro weights does not require a token.

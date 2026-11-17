@@ -259,3 +259,22 @@ smoke-test artefacts, not usable models.
 * **English only, single speaker.** The vocabulary is 38 ASCII characters
   and the model was trained only on LJSpeech's single female speaker.
 * **No prosody control.** Duration is predicted, not controllable.
+
+---
+
+## 9. Speech engines in the application
+
+The application ships two engines behind one interface
+(`voiceforge/app_core.py`):
+
+| Engine | Implementation | Output |
+|---|---|---|
+| `kokoro` (default) | `voiceforge/kokoro_backend.py`, pretrained Kokoro-82M | 24 kHz waveform (iSTFTNet) |
+| `voiceforge` | `voiceforge/tts.py`, the student-built Tacotron-lite | 80-band Mel → Griffin-Lim, 22.05 kHz |
+
+`VoiceForgeApp` validates text per engine (the custom model's 38-character
+vocabulary rejects digits; Kokoro accepts them), loads models lazily, and
+serialises CUDA work with a lock. The web layer passes `engine` and `voice`
+through `/generate`; `/health` reports both engines. Selection falls back to
+the custom model when Kokoro is unavailable, so the application always has a
+working engine. See `docs/kokoro.md` for the pretrained model's details.

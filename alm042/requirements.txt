@@ -4,6 +4,10 @@ torchaudio
 numpy
 soundfile
 
+# Pretrained TTS engine (Kokoro-82M).
+# Weights are downloaded from Hugging Face on first use (about 330 MB).
+kokoro
+
 # Testing
 pytest
 

@@ -1,18 +1,25 @@
 # VoiceForge
 
-**A custom English text-to-speech system built from scratch with PyTorch.**
+**An English text-to-speech application with a pretrained natural-speech engine
+and a student-built acoustic model.**
 
-VoiceForge is a university project that implements the complete text-to-speech
-pipeline itself — text normalisation, a character-level acoustic model, Mel
-spectrogram generation, Griffin-Lim waveform reconstruction, a Python library
-and an interactive web application. It does **not** wrap a pretrained TTS
-model or call an external speech service.
+VoiceForge is a university project with **two speech engines**:
 
-> **Current status:** the pipeline is complete and tested, but the acoustic
-> model is small and trained on a limited subset of LJSpeech. The generated
-> audio is recognisably synthesised speech and is **not expected to be fully
-> intelligible**. The measurements behind that statement are in
-> [docs/evaluation.md](docs/evaluation.md).
+1. **Kokoro-82M** — a pretrained, open-weight TTS model by
+   [hexgrad](https://huggingface.co/hexgrad/Kokoro-82M) (Apache-2.0). This is
+   the default engine and is what makes the application produce natural
+   speech. It was **not** trained by this project; the work here is the
+   integration, interface, testing and evaluation. See
+   [docs/kokoro.md](docs/kokoro.md).
+2. **The VoiceForge custom model** — a Tacotron-lite acoustic model written
+   and trained from scratch by the student (text processing, attention
+   encoder-decoder, duration predictor, Mel spectrograms, Griffin-Lim). It is
+   kept as an experimental backend and as evidence of the development work.
+
+> **Current status:** both engines work in the application. Kokoro produces
+> natural speech at ~30× faster than real time. The student's own model is
+> **not intelligible** — that is measured and documented in
+> [docs/evaluation.md](docs/evaluation.md), not hidden.
 
 | | |
 |---|---|
@@ -20,9 +27,10 @@ model or call an external speech service.
 | University | Yunnan University |
 | Student | Almaqtari Abdulrahman Mohammed Najib (20243120042) |
 | Branch | `alm042` |
-| Model | Tacotron-lite, 2,997,410 parameters |
-| Dataset | LJSpeech 1.1 (13,100 clips, single speaker, 22,050 Hz) |
-| Tests | 165 automated tests |
+| Main engine | Kokoro-82M (pretrained, Apache-2.0) |
+| Custom model | Tacotron-lite, 2,997,410 parameters |
+| Dataset (custom model) | LJSpeech 1.1 (13,100 clips, single speaker, 22,050 Hz) |
+| Tests | 194 automated tests (1 optional Kokoro test skipped by default) |
 
 ---
 
@@ -73,26 +81,43 @@ VoiceForge solves this with its own attention-based acoustic model:
 
 ## 2. Features
 
-- **Own model, own pipeline** — no pretrained TTS weights, no external API.
+- **Two speech engines** — pretrained Kokoro-82M for natural speech (default)
+  and the student-built model, selectable in the interface.
 - **Character-level text normalisation** — smart quotes, accents, brackets and
-  whitespace are normalised before encoding.
+  whitespace are normalised before encoding (custom model).
 - **Attention-based acoustic model** — convolutional encoder, bidirectional
   GRU, location-sensitive attention, GRU decoder, postnet and a duration
-  predictor.
+  predictor (student-built).
 - **Two decoding modes** — length-controlled decoding (stable) and fully
   autoregressive decoding with a stop token.
 - **Griffin-Lim vocoder** — reproducible, dependency-free waveform
-  reconstruction.
+  reconstruction for the custom model; Kokoro uses an iSTFTNet decoder.
+- **Seven Kokoro voices** — American English female and male voices.
 - **Command line generation** — `python -m scripts.generate`.
-- **Interactive web application** — text input, playback, WAV download,
-  validation messages and a loading indicator.
-- **Python library** — `from voiceforge import VoiceForgeTTS`.
+- **Interactive web application** — engine and voice selectors, text input,
+  playback, WAV download, validation messages and a loading indicator.
+- **Python library** — `from voiceforge import VoiceForgeTTS` and
+  `from voiceforge.kokoro_backend import KokoroBackend`.
 - **Objective evaluation tools** — Mel error, duration error, spectral detail,
   vocoder round-trip and audio defect detection.
-- **165 automated tests** covering text, audio, dataset, model, checkpointing,
-  training, generation, evaluation, the application and the public API.
+- **194 automated tests** covering text, audio, dataset, model, checkpointing,
+  training, generation, evaluation, both engines, the application and the
+  public API.
 
 ## 3. How it works
+
+### Kokoro-82M (default engine)
+
+```
+ English text → misaki G2P → phonemes → text encoder + duration predictor
+              → style-conditioned features → iSTFTNet decoder → 24 kHz waveform
+```
+
+### VoiceForge custom model (experimental)
+
+The full model, training configuration and measured limitations are described
+in [docs/architecture.md](docs/architecture.md) and
+[docs/training-v2.md](docs/training-v2.md).
 
 | Stage | What happens | Where |
 |---|---|---|
@@ -140,15 +165,16 @@ alm042/
 │   ├── evaluate.py               # Objective model evaluation
 │   ├── generate.py               # Command-line speech generation
 │   └── train.py                  # Training entry point
-├── tests/                        # 165 automated tests
+├── tests/                        # 194 automated tests
 └── voiceforge/
     ├── __init__.py               # Public API
     ├── app_core.py               # Application logic (shared by UIs)
     ├── architectures.py          # Architecture identifiers
     ├── audio.py                  # Audio I/O, Mel, Griffin-Lim
-    ├── batching.py               # Padding and collation
+    ├── batching.py               # Padding, collation, length bucketing
     ├── checkpoint.py             # Save/load and architecture dispatch
-    ├── dataset.py                # LJSpeech loader
+    ├── dataset.py                # LJSpeech loader + Mel cache
+    ├── kokoro_backend.py         # Kokoro-82M pretrained backend
     ├── model.py                  # Tacotron-lite model
     ├── model_legacy.py           # Original baseline model (preserved)
     ├── text.py                   # Normalisation and vocabulary
@@ -185,6 +211,21 @@ Verify the environment:
 ```bash
 python -c "import torch, torchaudio, soundfile; print(torch.__version__, torch.cuda.is_available())"
 ```
+
+### Kokoro weights (first run)
+
+`pip install -r requirements.txt` also installs the `kokoro` package. The
+pretrained weights (~330 MB) are downloaded from Hugging Face the first time
+the Kokoro engine is used, then cached. If huggingface.co is unreachable, use
+a mirror:
+
+```bash
+set HF_ENDPOINT=https://hf-mirror.com      # Windows
+export HF_ENDPOINT=https://hf-mirror.com   # Linux / macOS
+```
+
+Set `HF_HOME` to control where the cache lives. Details:
+[docs/kokoro.md](docs/kokoro.md).
 
 The web interface (`app.py`) uses only the Python standard library, so no
 extra packages are needed. See [section 10](#10-running-the-application) for
@@ -328,6 +369,18 @@ generate_speech("Hello world.", "output.wav")
 The complete API (arguments, attributes, errors, timings) is documented in
 [docs/api.md](docs/api.md).
 
+### Kokoro-82M (pretrained engine)
+
+```python
+from voiceforge.kokoro_backend import KokoroBackend
+
+tts = KokoroBackend(voice="af_heart")      # or af_bella, am_michael, ...
+tts.save("Hello, this is Kokoro speaking through VoiceForge.", "out.wav")
+```
+
+24 kHz output, ~0.03 real-time factor after warm-up. See
+[docs/kokoro.md](docs/kokoro.md).
+
 ## 10. Running the application
 
 ```bash
@@ -339,18 +392,22 @@ Then open <http://127.0.0.1:7860>.
 Useful options:
 
 ```bash
-python app.py --checkpoint checkpoints/voiceforge_attn.pt --port 7861 --open
-python app.py --device cpu          # force CPU
+python app.py --engine kokoro --voice am_michael   # pretrained engine (default)
+python app.py --engine voiceforge                  # student-built model
+python app.py --engine auto --open                 # pick automatically
+python app.py --device cpu                         # force CPU
+python app.py --port 7861 --open
 ```
 
 The interface provides:
 
+- a **speech engine selector** (Kokoro / VoiceForge custom),
+- a **Kokoro voice selector** (seven American English voices),
 - an English text box with a character counter and example sentences,
 - a **Generate Speech** button with a loading indicator,
 - in-browser playback and a **Download WAV** link,
-- clear validation and error messages (empty text, unsupported characters,
-  missing checkpoint),
-- an explicit notice that the model is experimental.
+- clear validation and error messages, with a notice explaining which engine
+  is pretrained and which is the student's own experimental model.
 
 Everything runs locally; no text or audio leaves the machine.
 
@@ -400,30 +457,46 @@ python -m pytest tests -q
 ```
 
 ```
-165 passed
+194 passed, 1 skipped
 ```
 
 The suite covers text processing, audio analysis and reconstruction, dataset
 parsing and filtering, model shapes and masking, checkpoint round-trips and
 architecture dispatch, the training loop, generation, evaluation metrics,
-audio defect detection, the web application (through a real HTTP server,
-including downloads and error responses) and the public API.
+audio defect detection, both speech engines, the web application (through a
+real HTTP server, including downloads and error responses) and the public API.
 
-Tests that need the LJSpeech dataset skip automatically when it is absent.
+Tests that need the LJSpeech dataset skip automatically when it is absent. The
+one optional test that performs real Kokoro generation runs only with:
+
+```bash
+set VOICEFORGE_TEST_KOKORO=1
+python -m pytest tests/test_kokoro_backend.py -q
+```
 
 ## 13. Known limitations
 
-1. **Not intelligible.** The model reproduces rhythm well (1.01× duration on a
-   memorised sentence) but correlates only 0.37 with the real spectrogram.
-   Attention remains diffuse, so the sounds are not accurate.
-2. **Small training budget.** 3,000 short clips for 14 epochs is far below the
-   tens of hours and thousands of steps a production Tacotron needs.
-3. **Exposure bias.** Teacher-forced error is 0.50, free-running error is 5.70:
-   the decoder drifts when fed its own output.
-4. **Griffin-Lim ceiling.** It is a phase-reconstruction baseline, not a neural
-   vocoder; the result is inherently buzzy.
-5. **English, single speaker.** 38-character ASCII vocabulary, no digits, no
-   prosody or emotion control.
+### Kokoro-82M (main engine)
+
+1. **Pretrained, not ours.** The model was trained by hexgrad; this project
+   integrates and evaluates it. No fine-tuning was performed.
+2. **First-run download.** ~330 MB from Hugging Face unless the cache is
+   pre-populated.
+3. **English-first.** Only American English voices are exposed.
+4. **Grapheme-to-phoneme errors.** Unusual proper nouns can be mispronounced
+   by `misaki`/`espeak-ng`.
+5. **No prosody control** beyond voice choice and a global speed factor.
+
+### VoiceForge custom model (experimental)
+
+1. **Not intelligible.** The student confirmed by listening that no words are
+   understandable, despite strong alignment improvements in v2.
+2. **Small training budget.** 6,000 clips and 5,000 steps is far below what a
+   production Tacotron needs.
+3. **Exposure bias.** Teacher-forced error 0.38, free-running 5.14 in v2.
+4. **Griffin-Lim ceiling.** A phase-reconstruction baseline, not a neural
+   vocoder.
+5. **English, single speaker.** 38-character ASCII vocabulary and no digits.
 6. **CPU inference is slow.** GPU generation takes ~0.4–0.7 s per sentence.
 7. **Gradio front-end untested** (see section 10).
 
@@ -441,15 +514,20 @@ Tests that need the LJSpeech dataset skip automatically when it is absent.
 
 | Document | Contents |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | Model design, losses, training configuration, limitations |
+| [docs/kokoro.md](docs/kokoro.md) | Kokoro-82M: why, architecture, licence, install, performance, comparison |
+| [docs/architecture.md](docs/architecture.md) | Custom model design, losses, training configuration, limitations |
+| [docs/training-v2.md](docs/training-v2.md) | The v2 training run: configuration, speed-ups, measured results |
 | [docs/evaluation.md](docs/evaluation.md) | Metric definitions, before/after results, interpretation |
 | [docs/api.md](docs/api.md) | Python API reference, errors, timings |
 
 ### Acknowledgements
 
+- **Kokoro-82M** by hexgrad — <https://huggingface.co/hexgrad/Kokoro-82M> —
+  Apache-2.0. Used as the pretrained main engine; **not trained by this
+  project**.
 - **LJSpeech 1.1** — Keith Ito and Linda Johnson, public domain dataset.
 - **Tacotron** (Wang et al., 2017) and **Tacotron 2** (Shen et al., 2018) —
-  architecture inspiration.
+  architecture inspiration for the custom model.
 - **Chorowski et al., 2015** — location-sensitive attention.
 - **Griffin & Lim, 1984** — phase reconstruction algorithm.
 - **PyTorch** and **torchaudio** for the implementation platform.

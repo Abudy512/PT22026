@@ -188,3 +188,23 @@ intelligibility**. A spectrogram can have low error and still be
 unintelligible, and vice versa. A proper evaluation would need a listening
 test (for example MOS scoring with several listeners), which was not
 performed. No subjective quality claim is made anywhere in this repository.
+
+---
+
+## Kokoro-82M: measured reference
+
+The application's main engine is the pretrained Kokoro-82M model. It is
+evaluated differently from the custom model because it produces waveforms,
+not Mel spectrograms, so the Mel-based metrics above do not apply.
+
+| Measurement | Value |
+|---|---|
+| Output | 24,000 Hz, 16-bit PCM |
+| Steady-state real-time factor | **0.03** (~30x faster than real time) |
+| Peak GPU memory | 0.73 GB |
+| First-load download | ~330 MB (cached afterwards) |
+| Audio defects (5 samples) | none (no NaN, silence, clipping or DC offset) |
+
+The custom model remains the object of the Mel/duration/alignment evaluation
+in this document. Full Kokoro details, including the voice list and the
+objective checks, are in `docs/kokoro.md`.

@@ -24,7 +24,6 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from voiceforge.app_core import (
-    ENGINE_LABELS,
     MAX_TEXT_LENGTH,
     AppError,
     VoiceForgeApp,
@@ -35,6 +34,7 @@ from voiceforge.jobs import (
     JobNotFound,
     JobQueueFull,
 )
+from voiceforge.cache import cleanup_mp3_cache
 from voiceforge.document_reader import extract_document
 from voiceforge.library import (
     DEFAULT_PAGE_SIZE,
@@ -71,8 +71,10 @@ STATIC_MIME_TYPES = {
     ".woff2": "font/woff2",
 }
 
-#: Extra headroom for base64 uploads (5 MB decoded is ~6.7 MB encoded).
-MAX_BODY_BYTES = 8 * 1024 * 1024
+#: Base64 inflates uploads by ~33 %: a 10 MB document needs ~13.4 MB, and
+#: the 5 MB TXT total needs ~6.7 MB. 15 MB leaves headroom for the JSON
+#: wrapper without allowing unbounded bodies.
+MAX_BODY_BYTES = 15 * 1024 * 1024
 
 
 class VoiceForgeServer(ThreadingHTTPServer):
@@ -1051,6 +1053,21 @@ def run(
 
     server = create_server(app, host=host, port=port)
     url = f"http://{host}:{server.server_address[1]}"
+
+    # Remove stale MP3 conversions. Only cached *.mp3 files are eligible;
+    # WAV files and the library database are never touched.
+    try:
+        summary = cleanup_mp3_cache(Path("outputs/mp3"))
+
+        if summary["removed"]:
+            print(
+                f"[cache] removed {len(summary['removed'])} stale MP3 file(s), "
+                f"freed {summary['freed_bytes']} bytes"
+            )
+        else:
+            print("[cache] MP3 cache is clean")
+    except Exception as error:  # noqa: BLE001 - never block startup
+        print(f"[cache] cleanup skipped: {error}")
 
     print(f"VoiceForge is running at {url}")
     print("Press Ctrl+C to stop.")

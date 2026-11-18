@@ -147,13 +147,16 @@ export function createPresetsPage({ capabilities, notifications }) {
     const actions = document.createElement("div");
     actions.className = "library-card-actions";
 
-    const use = document.createElement("a");
+    const use = document.createElement("button");
+    use.type = "button";
     use.className = "button button-ghost button-small";
-    use.href = "#studio";
     use.textContent = "Open Studio";
-    use.addEventListener("click", (event) => {
-      event.preventDefault();
-      window.location.hash = "studio";
+    use.addEventListener("click", () => {
+      const navItem = document.querySelector('.nav-item[data-page="studio"]');
+
+      if (navItem) {
+        navItem.click();
+      }
     });
 
     const edit = document.createElement("button");

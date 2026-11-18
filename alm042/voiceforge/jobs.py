@@ -420,12 +420,6 @@ class JobManager:
                     job.error = "The job failed unexpectedly."
                     job.finished_at = _now()
 
-    def _update(self, job: Job) -> None:
-        """Reserved for future persistence; keeps state changes explicit."""
-
-        with self._lock:
-            job.created_at = job.created_at
-
     def _process(self, job: Job) -> None:
         with self._lock:
             job.status = STATUS_RUNNING

@@ -108,7 +108,7 @@ def _extract_pdf(data: bytes) -> tuple[str, int]:
     return text, len(pages)
 
 
-def _extract_docx(data: bytes) -> tuple[str, int]:
+def _extract_docx(data: bytes) -> tuple[str, int | None]:
     try:
         import docx
         from docx.oxml.ns import qn
@@ -159,7 +159,8 @@ def _extract_docx(data: bytes) -> tuple[str, int]:
             code="empty_document",
         )
 
-    return text, len(document.paragraphs)
+    # DOCX files have no fixed page count, so none is reported.
+    return text, None
 
 
 def extract_document(name: object, data: bytes) -> dict:

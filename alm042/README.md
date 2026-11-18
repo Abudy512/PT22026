@@ -30,7 +30,7 @@ VoiceForge is a university project with **two speech engines**:
 | Main engine | Kokoro-82M (pretrained, Apache-2.0) |
 | Custom model | Tacotron-lite, 2,997,410 parameters |
 | Dataset (custom model) | LJSpeech 1.1 (13,100 clips, single speaker, 22,050 Hz) |
-| Tests | 292 automated tests (192 Python + 100 JavaScript), plus 16 optional real-Kokoro tests |
+| Tests | 300 automated tests (200 Python + 100 JavaScript), plus 16 optional real-Kokoro tests |
 
 ---
 
@@ -78,6 +78,18 @@ VoiceForge solves this with its own attention-based acoustic model:
       ▼
  WAV file / browser playback / Python API
 ```
+
+## 1.1 Project objectives
+
+1. Provide a **working local text-to-speech application** with no cloud
+   service and no API key.
+2. Integrate the pretrained **Kokoro-82M** engine as the main, usable voice.
+3. Implement and honestly evaluate a small **custom model** (Tacotron-lite
+   with a Griffin-Lim vocoder) as a learning artefact.
+4. Support realistic workflows: short text, long text, batches, documents,
+   reusable recordings, pronunciation rules, MP3 and presets.
+5. Keep the system testable and safe: parameterised SQL, validated uploads,
+   no tracebacks in responses, reproducible automated tests.
 
 ## 2. Features
 
@@ -166,7 +178,10 @@ alm042/
 ├── docs/
 │   ├── api.md                    # Python API reference
 │   ├── architecture.md           # Model and training design
-│   └── evaluation.md             # Metrics, results and interpretation
+│   ├── demo-plan.md              # 3-5 minute demonstration script
+│   ├── evaluation.md             # Metrics, results and interpretation
+│   ├── kokoro.md                 # Kokoro integration notes
+│   └── report-outline.md         # Academic report outline and fact sheet
 ├── frontend/                     # Static UI: HTML + CSS + ES modules
 │   ├── index.html                # Application shell
 │   ├── css/                      # style.css, layout.css, components.css
@@ -573,7 +588,7 @@ node --test frontend/tests
 ```
 
 ```
-192 passed, 16 skipped      # Python (the 16 skipped are optional real-Kokoro tests)
+200 passed, 16 skipped      # Python (the 16 skipped are optional real-Kokoro tests)
 100 passed                  # JavaScript
 ```
 
@@ -709,6 +724,7 @@ The library database uses `PRAGMA user_version`:
 Opening an older database upgrades it in place; existing audio records are
 never deleted or rewritten.
 
+
 ## 13. Known limitations
 
 ### Phase 5 features
@@ -809,3 +825,67 @@ never deleted or rewritten.
 
 The technical report for the course is prepared separately and is not part of
 this repository yet.
+
+## 16. MP3 cache cleanup
+
+MP3 files are generated on demand into `outputs/mp3/` and reused while their
+source WAV is unchanged. At startup the server removes cached MP3 files that
+are older than **7 days**, then trims the cache to **256 MB**, oldest first.
+
+The policy is deliberately narrow: only `*.mp3` files directly inside
+`outputs/mp3/` are eligible. Original WAV files, the SQLite database, the
+Audio Library and job folders are never touched, so a referenced recording
+can never be deleted by cleanup. The removed file count and freed bytes are
+printed in the server log.
+
+## 17. Clean installation
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python app.py
+```
+
+- Python **3.11+**; tested with 3.11.9 on Windows.
+- PyTorch (CPU or CUDA) is the largest dependency; a clean install may
+  download about 2 GB. A CUDA wheel is not required — CPU works.
+- The first Kokoro start needs **internet access** to fetch the 82 MB model
+  plus its voices (~330 MB total). After that the cached weights are reused;
+  if the default Hugging Face cache is not writable, the project falls back
+  to `outputs/hf/` automatically.
+- `pip check` reports no broken requirements for the tested environment, and
+  `pip install --dry-run -r requirements.txt` resolves cleanly.
+
+## 18. University delivery
+
+- **Report outline and verified fact sheet:** [docs/report-outline.md](docs/report-outline.md)
+- **3–5 minute demonstration script:** [docs/demo-plan.md](docs/demo-plan.md)
+- **Kokoro integration notes:** [docs/kokoro.md](docs/kokoro.md)
+
+The report outline contains only measured facts and lists the sources that
+must be cited (Kokoro model card, Tacotron paper, Griffin–Lim, SQLite,
+pypdf, python-docx, LAME, RFC 9110). It explicitly warns against claiming
+OCR support, production-quality custom speech, or unmeasured performance
+numbers.
+
+## 19. Licence
+
+- Application code in this repository: student coursework.
+- **Kokoro-82M** weights: Apache-2.0, © hexgrad; see the model card at
+  <https://huggingface.co/hexgrad/Kokoro-82M>. Attribution is retained here
+  and in `docs/kokoro.md`.
+- LJSpeech, if re-downloaded for training, is public domain.
+- Python dependencies keep their own licences (PyTorch BSD, pypdf BSD,
+  python-docx MIT, lameenc LGPL through LAME, etc.).
+
+## 20. Known limitations (summary)
+
+1. English only; Kokoro voices are US English.
+2. Scanned PDFs are not supported (no OCR).
+3. Pronunciation rules are respelling-based, not phoneme injection.
+4. Job history is in memory; recordings persist in the library.
+5. The custom Tacotron-lite model is experimental and audibly robotic.
+6. One generation at a time (shared model lock); long jobs queue.
+7. MP3 requires `lameenc` (listed) or FFmpeg.
+

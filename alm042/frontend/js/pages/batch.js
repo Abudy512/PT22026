@@ -16,6 +16,10 @@ import {
 } from "../batch-state.js";
 import { createJobView } from "../components/job-view.js";
 import {
+  createPresetSelect,
+  createPronunciationToggle,
+} from "../components/generation-extras.js";
+import {
   formatSpeed,
   speedControlVisible,
   voiceControlsVisible,
@@ -172,12 +176,39 @@ export function createBatchPage({ capabilities, notifications }) {
   voiceLabel.textContent = "Voice";
   voiceField.append(voiceLabel, voiceSelect);
 
+  const presetField = createPresetSelect({
+    capabilities,
+    notifications,
+    onApply: ({ engine, voice, speed }) => {
+      engineSelect.value = engine;
+      syncControls();
+
+      if (voice) {
+        voiceSelect.value = voice;
+      }
+
+      if (typeof speed === "number") {
+        speedInput.value = speed;
+        speedValue.textContent = formatSpeed(speed);
+      }
+    },
+  });
+
+  const pronunciationToggle = createPronunciationToggle();
+
   const submitButton = document.createElement("button");
   submitButton.type = "button";
   submitButton.className = "button button-primary button-block";
   submitButton.textContent = "Generate batch";
 
-  controlBody.append(engineField, voiceField, speedRow, submitButton);
+  controlBody.append(
+    engineField,
+    voiceField,
+    speedRow,
+    presetField.element,
+    pronunciationToggle.element,
+    submitButton,
+  );
   controlPanel.append(controlHead, controlBody);
 
   // --- Job view ---------------------------------------------------------
@@ -330,6 +361,7 @@ export function createBatchPage({ capabilities, notifications }) {
     const payload = {
       type: "batch",
       engine,
+      pronunciation: pronunciationToggle.enabled,
       items: validation.items,
     };
 

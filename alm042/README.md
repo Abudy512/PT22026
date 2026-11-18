@@ -30,7 +30,7 @@ VoiceForge is a university project with **two speech engines**:
 | Main engine | Kokoro-82M (pretrained, Apache-2.0) |
 | Custom model | Tacotron-lite, 2,997,410 parameters |
 | Dataset (custom model) | LJSpeech 1.1 (13,100 clips, single speaker, 22,050 Hz) |
-| Tests | 223 automated tests (142 Python + 81 JavaScript), plus 12 optional real-Kokoro tests |
+| Tests | 292 automated tests (192 Python + 100 JavaScript), plus 16 optional real-Kokoro tests |
 
 ---
 
@@ -97,6 +97,14 @@ VoiceForge solves this with its own attention-based acoustic model:
   without reloading the model.
 - **Persistent Audio Library** — every generated WAV is recorded in SQLite
   with its text, engine, voice, speed and duration, and survives restarts.
+- **Document to Speech** — extract text from PDF and DOCX, edit it, then
+  synthesise it through the long-text job workflow.
+- **Pronunciation dictionary** — teach names and terms how they should sound;
+  rules are applied before synthesis in every workflow.
+- **MP3 export** — download library recordings and batch results as MP3 at
+  128/192/320 kbps, alongside the original WAV.
+- **Voice presets** — save engine + voice + speed combinations and apply
+  them in Speech Studio, Batch Studio and Document to Speech.
 - **Command line generation** — `python -m scripts.generate`.
 - **Interactive web application** — engine and voice selectors, text input,
   playback, WAV download, validation messages and a loading indicator.
@@ -445,6 +453,16 @@ Everything runs locally; no text or audio leaves the machine.
 | PATCH | `/api/library/{id}` | `{name}` | Rename a recording |
 | DELETE | `/api/library/{id}` | — | Delete the record and its WAV |
 | GET | `/api/library/{id}/audio` | `?download=1` optional | Playback or download |
+| GET | `/api/library/{id}/mp3` | `?bitrate=128\|192\|320` | Convert the stored WAV to MP3 |
+| POST | `/api/documents/extract` | `{name, data_base64}` | Extract text from a PDF/DOCX |
+| GET | `/api/pronunciation` | `?q=` | List/search pronunciation rules |
+| POST | `/api/pronunciation` | `{word, pronunciation, description?}` | Add a rule |
+| PATCH | `/api/pronunciation/{id}` | same fields | Edit a rule |
+| DELETE | `/api/pronunciation/{id}` | — | Delete a rule |
+| GET | `/api/presets` | — | List voice presets |
+| POST | `/api/presets` | `{name, engine, voice?, speed?, description?}` | Create a preset |
+| PATCH | `/api/presets/{id}` | same fields | Edit a preset |
+| DELETE | `/api/presets/{id}` | — | Delete a preset |
 
 ### Long text, batches and uploads
 
@@ -555,8 +573,8 @@ node --test frontend/tests
 ```
 
 ```
-142 passed, 12 skipped      # Python (the 12 skipped are optional real-Kokoro tests)
-81 passed                   # JavaScript
+192 passed, 16 skipped      # Python (the 16 skipped are optional real-Kokoro tests)
+100 passed                  # JavaScript
 ```
 
 The optional Kokoro API tests load the real 82M model, so they are gated:
@@ -621,7 +639,92 @@ GET /api/library?q=welcome&sort=name&source=studio&page=1&limit=10
 - **Persistence**: records live in SQLite, so they remain after a restart
   even though background job status is still in memory.
 
+
+### Document to Speech
+
+Upload a PDF or DOCX (max 10 MB), review the extracted text in an editable
+box, then generate. The job runs through the existing Long Text pipeline and
+the result is saved in the Audio Library.
+
+- PDF text is extracted page by page with `pypdf`; blank pages are skipped.
+- DOCX paragraphs, headings and tables are read in document order with
+  `python-docx`; table cells are joined with ` | `.
+- **Scanned PDFs are not supported**: they contain images, and OCR is not
+  implemented. The API returns `no_extractable_text` with that explanation.
+- Encrypted PDFs return `encrypted_document`; corrupted files return
+  `invalid_document`; unsupported extensions return `unsupported_document`.
+- Extracted text longer than 20,000 characters is rejected with a clear
+  message instead of being silently truncated.
+
+### Pronunciation dictionary
+
+Rules are stored in SQLite (`pronunciation_entries`). During synthesis the
+matched word or phrase is replaced with your respelling **before** chunking,
+so Kokoro's text-to-phoneme step produces the intended sounds.
+
+- Matching is case-insensitive, whole-word / whole-phrase only, longest match
+  wins, punctuation is preserved and replacements are never applied
+  recursively.
+- This is a respelling approach, not raw phoneme injection: write the
+  pronunciation the way it should sound (`Ab-dool-rah-man`). Kokoro's G2P
+  converts it to phonemes; the custom engine receives the same replaced text.
+- The toggle appears in Speech Studio, Batch Studio and Document to Speech.
+  Jobs snapshot the dictionary once, so every item in a batch uses the same
+  rules.
+- The custom VoiceForge model applies the same text substitution, but its
+  phoneme behaviour differs from Kokoro's.
+
+### MP3 export
+
+`lameenc` (installed from `requirements.txt`) provides the LAME encoder, so
+no external FFmpeg is required. If it is missing, the server reports
+`mp3_unavailable` with installation instructions and can fall back to FFmpeg
+when it is on `PATH`.
+
+- Bitrates: 128, 192 (default) or 320 kbps.
+- Library recordings: `GET /api/library/{id}/mp3?bitrate=192`.
+- Batch results: `GET /api/jobs/{id}/download?format=mp3` (ZIP) or
+  `GET /api/jobs/{id}/audio/{item}?format=mp3`.
+- Conversions are cached under `outputs/mp3/`; the original WAV is never
+  modified and remains downloadable.
+
+### Voice presets
+
+Presets (`voice_presets`) store a name, engine, voice and speed. They are
+validated against the live `GET /api/engines` data, so invalid engine/voice
+combinations and out-of-range speeds are rejected. The custom engine stores
+no voice and no speed. Presets appear in Speech Studio, Batch Studio and
+Document to Speech; applying one only changes the controls — it never starts
+generation.
+
+### Database migrations
+
+The library database uses `PRAGMA user_version`:
+
+| Version | Contents |
+|---|---|
+| 1 | `audio_records` and its indexes |
+| 2 | adds `pronunciation_entries`, `voice_presets` and their indexes |
+
+Opening an older database upgrades it in place; existing audio records are
+never deleted or rewritten.
+
 ## 13. Known limitations
+
+### Phase 5 features
+
+1. **No OCR** — scanned PDFs cannot be read; only selectable text is
+   extracted.
+2. **Pronunciation is respelling, not IPA injection.** It changes the text
+   fed to the G2P step; exact pronunciation depends on how the respelling is
+   written. Kokoro's phonemizer may still normalise unusual spellings.
+3. **The custom engine has no speed or voice selection**, and its prosody is
+   much weaker than Kokoro's.
+4. **MP3 needs an encoder**: `lameenc` is listed in `requirements.txt`; if it
+   is removed, FFmpeg is required and the API returns `mp3_unavailable`.
+5. **MP3 files are cached** under `outputs/mp3/` and never committed; they
+   are not tracked as library records.
+6. **No preset import/export** and no per-item presets in a batch job.
 
 ### Audio Library
 

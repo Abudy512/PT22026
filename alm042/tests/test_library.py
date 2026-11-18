@@ -72,7 +72,7 @@ def test_database_is_created_with_table_and_indexes(tmp_path):
     assert "idx_records_name" in indexes
     assert "idx_records_engine" in indexes
     assert "idx_records_source_type" in indexes
-    assert version == 1
+    assert version == 2
 
 
 def test_reopening_keeps_records(tmp_path, wav_file):

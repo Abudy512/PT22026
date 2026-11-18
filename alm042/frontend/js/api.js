@@ -66,8 +66,19 @@ export async function fetchEngineInfo() {
  * @param {{text: string, engine: string, voice?: string|null,
  *          speed?: number|null, signal?: AbortSignal}} request
  */
-export async function generateSpeech({ text, engine, voice, speed, signal }) {
+export async function generateSpeech({
+  text,
+  engine,
+  voice,
+  speed,
+  pronunciation,
+  signal,
+}) {
   const body = { text, engine };
+
+  if (pronunciation) {
+    body.pronunciation = true;
+  }
 
   if (voice) {
     body.voice = voice;

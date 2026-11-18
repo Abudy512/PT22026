@@ -29,6 +29,8 @@ from voiceforge.app_core import (
 )
 from voiceforge.audio_join import AudioJoinError, join_wav_files
 from voiceforge.kokoro_backend import KOKORO_VOICES, validate_speed
+from voiceforge.mp3 import cached_mp3, validate_bitrate
+from voiceforge.pronunciation import apply_dictionary
 from voiceforge.text_split import MAX_LONG_TEXT_CHARS, split_text
 from voiceforge.uploads import sanitize_filename
 
@@ -84,6 +86,7 @@ class JobItem:
     error: str | None = None
     chunks_total: int = 0
     chunks_completed: int = 0
+    replacements: int = 0
 
     def to_dict(self, download_url: str | None = None) -> dict:
         return {
@@ -96,6 +99,7 @@ class JobItem:
             "text_preview": self.text[:120],
             "chunks_total": self.chunks_total,
             "chunks_completed": self.chunks_completed,
+            "replacements": self.replacements,
             "download_url": download_url if self.status == STATUS_COMPLETED else None,
         }
 
@@ -109,6 +113,7 @@ class Job:
     speed: float | None
     items: list[JobItem]
     created_at: str = field(default_factory=_now)
+    dictionary: list[dict] = field(default_factory=list)
     status: str = STATUS_QUEUED
     error: str | None = None
     finished_at: str | None = None
@@ -375,6 +380,12 @@ class JobManager:
                 )
             )
 
+        dictionary: list[dict] = []
+
+        if payload.get("pronunciation") and self.library is not None:
+            # One snapshot per job: every item uses the same rules.
+            dictionary = self.library.list_pronunciation()  # type: ignore[attr-defined]
+
         return Job(
             id=uuid.uuid4().hex[:12],
             type=job_type,
@@ -382,6 +393,7 @@ class JobManager:
             voice=voice,
             speed=speed,
             items=job_items,
+            dictionary=dictionary,
         )
 
     # ------------------------------------------------------------------
@@ -427,7 +439,15 @@ class JobManager:
             chunk_paths: list[str] = []
 
             try:
-                chunks = split_text(item.text, CHUNK_LIMITS[job.engine])
+                text = item.text
+
+                if job.dictionary:
+                    text, replacements = apply_dictionary(text, job.dictionary)
+
+                    with self._lock:
+                        item.replacements = replacements
+
+                chunks = split_text(text, CHUNK_LIMITS[job.engine])
 
                 if not chunks:
                     raise AppError("The item contains no usable text.")
@@ -560,13 +580,27 @@ class JobManager:
 
         raise FileNotFoundError(item_id)
 
-    def archive(self, job_id: str) -> tuple[bytes, str]:
+    def archive(
+        self,
+        job_id: str,
+        format: str = "wav",
+        bitrate: int = 192,
+    ) -> tuple[bytes, str]:
         """
-        Build a ZIP with every completed WAV plus a manifest.
+        Build a ZIP with every completed item plus a manifest.
 
-        Returns ``(bytes, download_name)``. Only files recorded on the job
-        are included; client input never becomes a path.
+        ``format`` is ``wav`` (the stored files) or ``mp3`` (converted on
+        demand through the cached encoder). Returns ``(bytes, name)``.
         """
+
+        if format not in ("wav", "mp3"):
+            raise AppError(
+                "Unsupported archive format. Choose wav or mp3.",
+                code="invalid_format",
+            )
+
+        if format == "mp3":
+            bitrate = validate_bitrate(bitrate)
 
         job = self.get(job_id)
 
@@ -608,10 +642,23 @@ class JobManager:
                     continue
 
                 stem = sanitize_filename(item.name, fallback=f"item_{index}")
-                arcname = f"{index:02d}_{stem.removesuffix('.txt')}.wav"
+                base = f"{index:02d}_{stem.removesuffix('.txt')}"
+
+                if format == "mp3":
+                    mp3_path, _ = cached_mp3(
+                        source,
+                        self.job_root / job.id / "mp3",
+                        bitrate,
+                    )
+                    source = mp3_path
+                    base = f"{base}.mp3"
+                else:
+                    base = f"{base}.wav"
+
+                arcname = base
 
                 while arcname in used_names:
-                    arcname = f"{index:02d}_{stem.removesuffix('.txt')}_{len(used_names)}.wav"
+                    arcname = f"{base.rsplit('.', 1)[0]}_{len(used_names)}.{format}"
 
                 used_names.add(arcname)
                 archive.write(source, arcname=arcname)
@@ -627,6 +674,8 @@ class JobManager:
                 )
 
             manifest = {
+                "format": format,
+                "bitrate": bitrate if format == "mp3" else None,
                 "job_id": job.id,
                 "type": job.type,
                 "engine": job.engine,

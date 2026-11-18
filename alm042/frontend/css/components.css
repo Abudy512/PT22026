@@ -774,3 +774,112 @@
     flex-direction: column;
   }
 }
+
+
+/* --- Phase 5: document, dictionary, presets ------------------------------ */
+
+.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.checkbox-row input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.document-text {
+  min-height: 260px;
+}
+
+.dictionary-form,
+.preset-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-items: center;
+}
+
+.dictionary-form button,
+.preset-form button {
+  justify-self: start;
+}
+
+.dictionary-list,
+.preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dictionary-row,
+.preset-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(13, 20, 29, 0.55);
+}
+
+.dictionary-text,
+.preset-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dictionary-word,
+.preset-name {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.dictionary-arrow {
+  color: var(--text-dim);
+}
+
+.dictionary-pronunciation {
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.dictionary-note,
+.preset-meta {
+  font-size: 12px;
+  color: var(--text-dim);
+  flex-basis: 100%;
+}
+
+.preset-speed {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.preset-speed .range {
+  flex: 1;
+}
+
+@media (max-width: 720px) {
+  .dictionary-form,
+  .preset-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dictionary-row,
+  .preset-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

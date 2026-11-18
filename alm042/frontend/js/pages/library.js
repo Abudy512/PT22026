@@ -6,6 +6,7 @@
  */
 
 import { ApiError } from "../api.js";
+import { buildMp3Url } from "../advanced-state.js";
 import {
   audioUrl,
   deleteRecord,
@@ -46,6 +47,7 @@ export function createLibraryPage({ capabilities, notifications }) {
     page: 1,
     pages: 0,
     total: 0,
+    mp3Bitrate: 192,
     records: [],
     loading: false,
     error: null,
@@ -107,7 +109,17 @@ export function createLibraryPage({ capabilities, notifications }) {
     sourceSelect.append(option(source, SOURCE_LABELS[source]));
   }
 
-  toolbar.append(search, sortSelect, engineSelect, sourceSelect);
+  const bitrateSelect = document.createElement("select");
+  bitrateSelect.className = "select";
+  bitrateSelect.setAttribute("aria-label", "MP3 quality");
+  bitrateSelect.append(
+    option("128", "MP3 128 kbps"),
+    option("192", "MP3 192 kbps"),
+    option("320", "MP3 320 kbps"),
+  );
+  bitrateSelect.value = "192";
+
+  toolbar.append(search, sortSelect, engineSelect, sourceSelect, bitrateSelect);
 
   const list = document.createElement("div");
   list.className = "library-list";
@@ -221,11 +233,17 @@ export function createLibraryPage({ capabilities, notifications }) {
     download.className = "button button-ghost button-small";
     download.href = downloadUrl(record);
     download.setAttribute("download", `${record.name}.wav`);
-    download.textContent = "⬇ Download WAV";
+    download.textContent = "⬇ WAV";
+
+    const mp3 = document.createElement("a");
+    mp3.className = "button button-ghost button-small";
+    mp3.href = buildMp3Url(record.id, state.mp3Bitrate);
+    mp3.setAttribute("download", "");
+    mp3.textContent = "MP3";
 
     const player = document.createElement("div");
     player.className = "library-card-player";
-    player.append(audio, download);
+    player.append(audio, download, mp3);
 
     card.append(top, meta, preview, player);
 
@@ -425,6 +443,11 @@ export function createLibraryPage({ capabilities, notifications }) {
     state.source = sourceSelect.value;
     state.page = 1;
     load();
+  });
+
+  bitrateSelect.addEventListener("change", () => {
+    state.mp3Bitrate = Number(bitrateSelect.value);
+    render();
   });
 
   prevButton.addEventListener("click", () => {

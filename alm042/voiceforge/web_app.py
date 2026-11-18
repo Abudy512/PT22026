@@ -13,6 +13,8 @@ CSS and ES modules).  This module only serves those files and the JSON API:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import traceback
 import webbrowser
@@ -33,10 +35,18 @@ from voiceforge.jobs import (
     JobNotFound,
     JobQueueFull,
 )
+from voiceforge.document_reader import extract_document
 from voiceforge.library import (
     DEFAULT_PAGE_SIZE,
     Library,
 )
+from voiceforge.mp3 import (
+    DEFAULT_BITRATE,
+    SUPPORTED_BITRATES,
+    cached_mp3,
+    validate_bitrate,
+)
+from voiceforge.pronunciation import apply_dictionary
 from voiceforge.uploads import validate_uploads
 
 #: Static frontend root (``alm042/frontend``).
@@ -247,6 +257,14 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
             self._handle_library_get(path)
             return
 
+        if path == "/api/pronunciation" or path.startswith("/api/pronunciation/"):
+            self._handle_pronunciation_get(path)
+            return
+
+        if path == "/api/presets" or path.startswith("/api/presets/"):
+            self._handle_presets_get(path)
+            return
+
         if path.startswith("/audio/"):
             self._send_audio(path[len("/audio/"):])
             return
@@ -345,6 +363,18 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
             self._handle_upload()
             return
 
+        if path == "/api/documents/extract":
+            self._handle_document_extract()
+            return
+
+        if path == "/api/pronunciation":
+            self._handle_pronunciation_create()
+            return
+
+        if path == "/api/presets":
+            self._handle_preset_create()
+            return
+
         self._send_error_json(404, "Page not found.", "not_found")
 
     # ------------------------------------------------------------------
@@ -381,7 +411,15 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
                 return
 
             if len(parts) == 2 and parts[1] == "download":
-                archive, download_name = jobs.archive(job_id)
+                query = parse_qs(urlparse(self.path).query)
+                archive_format = (query.get("format") or ["wav"])[0].lower()
+                raw_bitrate = (query.get("bitrate") or [str(DEFAULT_BITRATE)])[0]
+
+                archive, download_name = jobs.archive(
+                    job_id,
+                    format=archive_format,
+                    bitrate=raw_bitrate,
+                )
 
                 self._send_bytes(
                     200,
@@ -403,6 +441,38 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
                         404,
                         "Audio not found.",
                         "audio_not_found",
+                    )
+                    return
+
+                query = parse_qs(urlparse(self.path).query)
+                item_format = (query.get("format") or ["wav"])[0].lower()
+
+                if item_format == "mp3":
+                    bitrate = validate_bitrate(
+                        (query.get("bitrate") or [str(DEFAULT_BITRATE)])[0]
+                    )
+                    mp3_path, _ = cached_mp3(
+                        item_path,
+                        self.server.jobs.job_root / job_id / "mp3",  # type: ignore[attr-defined]
+                        bitrate,
+                    )
+                    self._send_bytes(
+                        200,
+                        mp3_path.read_bytes(),
+                        "audio/mpeg",
+                        {
+                            "Content-Disposition": (
+                                f'attachment; filename="{mp3_path.name}"'
+                            )
+                        },
+                    )
+                    return
+
+                if item_format != "wav":
+                    self._send_error_json(
+                        400,
+                        "Unsupported audio format. Choose wav or mp3.",
+                        "invalid_format",
                     )
                     return
 
@@ -452,8 +522,19 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
 
         try:
             payload = self._read_json_body()
+            text = payload.get("text")
+
+            if payload.get("pronunciation") and isinstance(text, str):
+                entries = self.server.library.list_pronunciation()  # type: ignore[attr-defined]
+                text, replacements = apply_dictionary(text, entries)
+                if replacements:
+                    print(
+                        f"[web] applied {replacements} pronunciation rule(s)",
+                        flush=True,
+                    )
+
             result = self.app.synthesize(
-                payload.get("text"),
+                text,
                 engine=payload.get("engine") or None,
                 voice=payload.get("voice") or None,
                 speed=payload.get("speed"),
@@ -462,7 +543,7 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
             self._send_app_error(error)
             return
 
-        self._record_studio_audio(result)
+        record = self._record_studio_audio(result)
 
         self._send_json(
             200,
@@ -478,6 +559,10 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
                 "speed": result.speed,
                 "padded": result.padded,
                 "truncated": result.truncated,
+                "library_id": record["id"] if record else None,
+                "mp3_url": (
+                    f"/api/library/{record['id']}/mp3" if record else None
+                ),
             },
         )
 
@@ -506,7 +591,7 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
         """Record a successful Speech Studio generation (best effort)."""
 
         try:
-            self.server.library.record(  # type: ignore[attr-defined]
+            return self.server.library.record(  # type: ignore[attr-defined]
                 text=result.text,
                 source_filename=result.filename,
                 source_path=result.path,
@@ -519,6 +604,7 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
             )
         except Exception as error:  # noqa: BLE001 - never fail the request
             print(f"[web] could not add audio to the library: {error}", flush=True)
+            return None
 
     def _handle_library_get(self, path: str) -> None:
         if path == "/api/library":
@@ -535,6 +621,10 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
 
         if len(parts) == 2 and parts[1] == "audio":
             self._handle_library_audio(record_id)
+            return
+
+        if len(parts) == 2 and parts[1] == "mp3":
+            self._handle_library_mp3(record_id)
             return
 
         if len(parts) == 1:
@@ -641,10 +731,29 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
     def _handle_patch(self) -> None:
         record_id = self._library_target()
 
-        if not record_id:
-            self._send_error_json(404, "Page not found.", "not_found")
+        if record_id:
+            self._handle_library_rename(record_id)
             return
 
+        path = self.path.split("?", 1)[0]
+
+        if path.startswith("/api/pronunciation/"):
+            entry_id = path[len("/api/pronunciation/"):].strip("/")
+
+            if entry_id:
+                self._handle_pronunciation_update(entry_id)
+                return
+
+        if path.startswith("/api/presets/"):
+            preset_id = path[len("/api/presets/"):].strip("/")
+
+            if preset_id:
+                self._handle_preset_update(preset_id)
+                return
+
+        self._send_error_json(404, "Page not found.", "not_found")
+
+    def _handle_library_rename(self, record_id: str) -> None:
         try:
             payload = self._read_json_body()
             record = self.server.library.rename(  # type: ignore[attr-defined]
@@ -660,10 +769,29 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
     def _handle_delete(self) -> None:
         record_id = self._library_target()
 
-        if not record_id:
-            self._send_error_json(404, "Page not found.", "not_found")
+        if record_id:
+            self._handle_library_delete(record_id)
             return
 
+        path = self.path.split("?", 1)[0]
+
+        if path.startswith("/api/pronunciation/"):
+            entry_id = path[len("/api/pronunciation/"):].strip("/")
+
+            if entry_id:
+                self._handle_pronunciation_delete(entry_id)
+                return
+
+        if path.startswith("/api/presets/"):
+            preset_id = path[len("/api/presets/"):].strip("/")
+
+            if preset_id:
+                self._handle_preset_delete(preset_id)
+                return
+
+        self._send_error_json(404, "Page not found.", "not_found")
+
+    def _handle_library_delete(self, record_id: str) -> None:
         try:
             deleted = self.server.library.delete(record_id)  # type: ignore[attr-defined]
         except AppError as error:
@@ -671,6 +799,230 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
             return
 
         self._send_json(200, {"ok": True, "deleted": deleted})
+
+    # ------------------------------------------------------------------
+    # Documents
+    # ------------------------------------------------------------------
+    def _handle_document_extract(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        data = payload.get("data_base64")
+
+        if not isinstance(data, str) or not data:
+            self._send_error_json(
+                400,
+                "The document is empty.",
+                "empty_document",
+            )
+            return
+
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError):
+            self._send_error_json(
+                400,
+                "The uploaded document could not be decoded.",
+                "invalid_document",
+            )
+            return
+
+        try:
+            document = extract_document(payload.get("name"), raw)
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        self._send_json(200, {"ok": True, "document": document})
+
+    # ------------------------------------------------------------------
+    # Pronunciation dictionary
+    # ------------------------------------------------------------------
+    def _handle_pronunciation_get(self, path: str) -> None:
+        if path == "/api/pronunciation":
+            query = parse_qs(urlparse(self.path).query)
+            text = (query.get("q") or [""])[0].strip() or None
+
+            try:
+                entries = self.server.library.list_pronunciation(text)  # type: ignore[attr-defined]
+            except AppError as error:
+                self._send_app_error(error)
+                return
+
+            self._send_json(200, {"ok": True, "entries": entries})
+            return
+
+        entry_id = path[len("/api/pronunciation/"):].strip("/")
+
+        if not entry_id:
+            self._send_error_json(404, "Page not found.", "not_found")
+            return
+
+        try:
+            entry = self.server.library.get_pronunciation(entry_id)  # type: ignore[attr-defined]
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        self._send_json(200, {"ok": True, "entry": entry})
+
+    def _handle_pronunciation_create(self) -> None:
+        try:
+            payload = self._read_json_body()
+            entry = self.server.library.add_pronunciation(  # type: ignore[attr-defined]
+                payload.get("word"),
+                payload.get("pronunciation"),
+                payload.get("description"),
+            )
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        self._send_json(201, {"ok": True, "entry": entry})
+
+    def _handle_pronunciation_update(self, entry_id: str) -> None:
+        try:
+            payload = self._read_json_body()
+            entry = self.server.library.update_pronunciation(  # type: ignore[attr-defined]
+                entry_id,
+                payload.get("word"),
+                payload.get("pronunciation"),
+                payload.get("description"),
+            )
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        self._send_json(200, {"ok": True, "entry": entry})
+
+    def _handle_pronunciation_delete(self, entry_id: str) -> None:
+        try:
+            deleted = self.server.library.delete_pronunciation(entry_id)  # type: ignore[attr-defined]
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        self._send_json(200, {"ok": True, "deleted": deleted})
+
+    # ------------------------------------------------------------------
+    # Voice presets
+    # ------------------------------------------------------------------
+    def _handle_presets_get(self, path: str) -> None:
+        if path == "/api/presets":
+            try:
+                presets = self.server.library.list_presets()  # type: ignore[attr-defined]
+            except AppError as error:
+                self._send_app_error(error)
+                return
+
+            self._send_json(200, {"ok": True, "presets": presets})
+            return
+
+        preset_id = path[len("/api/presets/"):].strip("/")
+
+        if not preset_id:
+            self._send_error_json(404, "Page not found.", "not_found")
+            return
+
+        try:
+            preset = self.server.library.get_preset(preset_id)  # type: ignore[attr-defined]
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        self._send_json(200, {"ok": True, "preset": preset})
+
+    def _handle_preset_create(self) -> None:
+        try:
+            payload = self._read_json_body()
+            preset = self.server.library.create_preset(  # type: ignore[attr-defined]
+                payload.get("name"),
+                payload.get("engine"),
+                payload.get("voice"),
+                payload.get("speed"),
+                payload.get("description"),
+            )
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        self._send_json(201, {"ok": True, "preset": preset})
+
+    def _handle_preset_update(self, preset_id: str) -> None:
+        try:
+            payload = self._read_json_body()
+            preset = self.server.library.update_preset(  # type: ignore[attr-defined]
+                preset_id,
+                payload.get("name"),
+                payload.get("engine"),
+                payload.get("voice"),
+                payload.get("speed"),
+                payload.get("description"),
+            )
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        self._send_json(200, {"ok": True, "preset": preset})
+
+    def _handle_preset_delete(self, preset_id: str) -> None:
+        try:
+            deleted = self.server.library.delete_preset(preset_id)  # type: ignore[attr-defined]
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        self._send_json(200, {"ok": True, "deleted": deleted})
+
+    # ------------------------------------------------------------------
+    # MP3 export
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _safe_download_name(name: str, fallback: str = "voiceforge-audio") -> str:
+        cleaned = "".join(
+            character
+            if (
+                character.isascii()
+                and (character.isalnum() or character in " -_().")
+            )
+            else "_"
+            for character in str(name or "")
+        ).strip(" ._")
+
+        return (cleaned[:60] or fallback)
+
+    def _handle_library_mp3(self, record_id: str) -> None:
+        query = parse_qs(self.query_string())
+        raw_bitrate = (query.get("bitrate") or [str(DEFAULT_BITRATE)])[0]
+
+        try:
+            bitrate = validate_bitrate(raw_bitrate)
+            record, wav_path = self.server.library.audio_path(record_id)  # type: ignore[attr-defined]
+            cache_dir = self.server.library.audio_dir.parent / "mp3"  # type: ignore[attr-defined]
+            mp3_path, _ = cached_mp3(wav_path, cache_dir, bitrate)
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        download_name = self._safe_download_name(record["name"]) + ".mp3"
+
+        self._send_bytes(
+            200,
+            mp3_path.read_bytes(),
+            "audio/mpeg",
+            {
+                "Content-Disposition": (
+                    f'attachment; filename="{download_name}"'
+                ),
+                "X-MP3-Bitrate": str(bitrate),
+            },
+        )
+
+    def query_string(self) -> str:
+        return self.path.split("?", 1)[1] if "?" in self.path else ""
 
     # Keep the console readable: one short line per request.
     def log_message(self, format: str, *args: Any) -> None:

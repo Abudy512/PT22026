@@ -8,7 +8,10 @@
 import { ApiError, fetchEngineInfo } from "./api.js";
 import { createNotifications } from "./components/notifications.js";
 import { createBatchPage } from "./pages/batch.js";
+import { createDocumentsPage } from "./pages/documents.js";
 import { createLibraryPage } from "./pages/library.js";
+import { createPresetsPage } from "./pages/presets.js";
+import { createPronunciationPage } from "./pages/pronunciation.js";
 import { createComingSoonPage } from "./pages/coming-soon.js";
 import { createStudioPage } from "./pages/studio.js";
 import { createStore } from "./state.js";
@@ -23,14 +26,12 @@ const NAV_ITEMS = [
     kind: "studio",
   },
   {
-    id: "compare",
-    label: "Voice Compare",
-    icon: "\u21c4",
-    title: "Voice Compare",
-    subtitle: "Hear the same sentence across engines and voices.",
-    kind: "soon",
-    description:
-      "Voice Compare will generate one sentence with several engines and voices so you can listen back to back.",
+    id: "documents",
+    label: "Document to Speech",
+    icon: "\u25a3",
+    title: "Document to Speech",
+    subtitle: "Turn a PDF or DOCX into speech.",
+    kind: "documents",
   },
   {
     id: "batch",
@@ -49,24 +50,20 @@ const NAV_ITEMS = [
     kind: "library",
   },
   {
-    id: "tools",
-    label: "Text Tools",
+    id: "pronunciation",
+    label: "Pronunciation",
     icon: "\u270e",
-    title: "Text Tools",
-    subtitle: "Clean and prepare text before synthesis.",
-    kind: "soon",
-    description:
-      "Text Tools will normalise punctuation, expand numbers and split long documents into speakable chunks.",
+    title: "Pronunciation Dictionary",
+    subtitle: "Teach VoiceForge how names and terms should sound.",
+    kind: "pronunciation",
   },
   {
-    id: "settings",
-    label: "Settings",
-    icon: "\u2699",
-    title: "Settings",
-    subtitle: "Engine defaults, cache and application preferences.",
-    kind: "soon",
-    description:
-      "Settings will expose the default engine and voice, the Hugging Face cache location and other preferences.",
+    id: "presets",
+    label: "Voice Presets",
+    icon: "\u2605",
+    title: "Voice Presets",
+    subtitle: "Save engine, voice and speed combinations.",
+    kind: "presets",
   },
 ];
 
@@ -92,6 +89,12 @@ let batchPage = null;
 let batchHost = null;
 let libraryPage = null;
 let libraryHost = null;
+let documentsPage = null;
+let documentsHost = null;
+let pronunciationPage = null;
+let pronunciationHost = null;
+let presetsPage = null;
+let presetsHost = null;
 let activePage = null;
 
 function mountPage(page) {
@@ -282,6 +285,56 @@ function renderPage() {
 
     mountPage(batchPage);
     dom.pageRoot.replaceChildren(batchHost);
+    return;
+  }
+
+  if (item.kind === "documents") {
+    if (!capabilities) {
+      dom.pageRoot.replaceChildren(
+        error ? renderErrorState(error) : renderLoadingState(),
+      );
+      return;
+    }
+
+    if (!documentsPage) {
+      documentsPage = createDocumentsPage({ capabilities, notifications });
+      documentsHost = document.createElement("div");
+      documentsHost.append(documentsPage.element);
+    }
+
+    mountPage(documentsPage);
+    dom.pageRoot.replaceChildren(documentsHost);
+    return;
+  }
+
+  if (item.kind === "pronunciation") {
+    if (!pronunciationPage) {
+      pronunciationPage = createPronunciationPage({ notifications });
+      pronunciationHost = document.createElement("div");
+      pronunciationHost.append(pronunciationPage.element);
+    }
+
+    mountPage(pronunciationPage);
+    dom.pageRoot.replaceChildren(pronunciationHost);
+    return;
+  }
+
+  if (item.kind === "presets") {
+    if (!capabilities) {
+      dom.pageRoot.replaceChildren(
+        error ? renderErrorState(error) : renderLoadingState(),
+      );
+      return;
+    }
+
+    if (!presetsPage) {
+      presetsPage = createPresetsPage({ capabilities, notifications });
+      presetsHost = document.createElement("div");
+      presetsHost.append(presetsPage.element);
+    }
+
+    mountPage(presetsPage);
+    dom.pageRoot.replaceChildren(presetsHost);
     return;
   }
 

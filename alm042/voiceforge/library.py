@@ -19,14 +19,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from voiceforge.app_core import AppError
+from voiceforge.kokoro_backend import (
+    DEFAULT_SPEED,
+    DEFAULT_VOICE,
+    KOKORO_VOICES,
+    validate_speed,
+)
 
 #: Current schema version (``PRAGMA user_version``).
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DEFAULT_DB_PATH = "outputs/library.db"
 DEFAULT_AUDIO_DIR = "outputs/library"
 
 MAX_NAME_LENGTH = 80
+MAX_WORD_LENGTH = 80
+MAX_PRONUNCIATION_LENGTH = 200
+MAX_PRESET_NAME = 60
+
+#: Engines that a preset may reference.
+PRESET_ENGINES = ("kokoro", "voiceforge")
 MAX_SEARCH_LENGTH = 200
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
@@ -79,6 +91,32 @@ CREATE INDEX IF NOT EXISTS idx_records_engine
 
 CREATE INDEX IF NOT EXISTS idx_records_source_type
     ON audio_records(source_type);
+
+CREATE TABLE IF NOT EXISTS pronunciation_entries (
+    id TEXT PRIMARY KEY,
+    word TEXT NOT NULL,
+    pronunciation TEXT NOT NULL,
+    description TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pron_word
+    ON pronunciation_entries(word COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS voice_presets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    engine TEXT NOT NULL,
+    voice TEXT,
+    speed REAL,
+    description TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_preset_name
+    ON voice_presets(name COLLATE NOCASE);
 """
 
 
@@ -515,3 +553,385 @@ class Library:
                 connection.close()
 
         return {"id": record["id"], "filename": record["filename"]}
+
+
+    # ------------------------------------------------------------------
+    # Pronunciation dictionary
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _validate_rule(word: object, pronunciation: object) -> tuple[str, str]:
+        if not isinstance(word, str) or not word.strip():
+            raise AppError(
+                "Enter the word or phrase to replace.",
+                code="invalid_word",
+            )
+
+        cleaned_word = " ".join(word.split()).strip()
+
+        if len(cleaned_word) > MAX_WORD_LENGTH:
+            raise AppError(
+                f"The word is too long ({len(cleaned_word)} characters). "
+                f"The limit is {MAX_WORD_LENGTH}.",
+                code="invalid_word",
+            )
+
+        if any(ord(character) < 32 for character in cleaned_word):
+            raise AppError(
+                "The word contains control characters.",
+                code="invalid_word",
+            )
+
+        if not isinstance(pronunciation, str) or not pronunciation.strip():
+            raise AppError(
+                "Enter the pronunciation.",
+                code="invalid_pronunciation",
+            )
+
+        cleaned_pronunciation = " ".join(pronunciation.split()).strip()
+
+        if len(cleaned_pronunciation) > MAX_PRONUNCIATION_LENGTH:
+            raise AppError(
+                f"The pronunciation is too long "
+                f"({len(cleaned_pronunciation)} characters). "
+                f"The limit is {MAX_PRONUNCIATION_LENGTH}.",
+                code="invalid_pronunciation",
+            )
+
+        if any(ord(character) < 32 for character in cleaned_pronunciation):
+            raise AppError(
+                "The pronunciation contains control characters.",
+                code="invalid_pronunciation",
+            )
+
+        return cleaned_word, cleaned_pronunciation
+
+    def list_pronunciation(self, query: str | None = None) -> list[dict]:
+        sql = "SELECT * FROM pronunciation_entries"
+        params: list[object] = []
+
+        if query:
+            if len(query) > MAX_SEARCH_LENGTH:
+                raise AppError(
+                    "The search text is too long.",
+                    code="invalid_search",
+                )
+
+            pattern = f"%{_escape_like(query)}%"
+            sql += (
+                " WHERE word LIKE ? ESCAPE '\\' "
+                "OR pronunciation LIKE ? ESCAPE '\\' "
+                "OR COALESCE(description, '') LIKE ? ESCAPE '\\'"
+            )
+            params = [pattern, pattern, pattern]
+
+        sql += " ORDER BY word COLLATE NOCASE ASC"
+
+        with self._connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def get_pronunciation(self, entry_id: str) -> dict:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM pronunciation_entries WHERE id = ?",
+                (str(entry_id),),
+            ).fetchone()
+
+        if row is None:
+            raise AppError(
+                "Pronunciation entry not found.",
+                code="entry_not_found",
+                status=404,
+            )
+
+        return dict(row)
+
+    def add_pronunciation(
+        self,
+        word: object,
+        pronunciation: object,
+        description: str | None = None,
+    ) -> dict:
+        cleaned_word, cleaned_pronunciation = self._validate_rule(
+            word, pronunciation
+        )
+
+        entry_id = uuid.uuid4().hex
+        timestamp = _now()
+
+        with self._lock:
+            with self._connect() as connection:
+                existing = connection.execute(
+                    "SELECT id FROM pronunciation_entries "
+                    "WHERE word = ? COLLATE NOCASE",
+                    (cleaned_word,),
+                ).fetchone()
+
+                if existing is not None:
+                    raise AppError(
+                        f"'{cleaned_word}' already has a pronunciation rule.",
+                        code="duplicate_word",
+                        status=409,
+                    )
+
+                connection.execute(
+                    "INSERT INTO pronunciation_entries "
+                    "(id, word, pronunciation, description, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        entry_id,
+                        cleaned_word,
+                        cleaned_pronunciation,
+                        (description or "").strip()[:200] or None,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+
+        return self.get_pronunciation(entry_id)
+
+    def update_pronunciation(
+        self,
+        entry_id: str,
+        word: object,
+        pronunciation: object,
+        description: str | None = None,
+    ) -> dict:
+        self.get_pronunciation(entry_id)
+        cleaned_word, cleaned_pronunciation = self._validate_rule(
+            word, pronunciation
+        )
+
+        with self._lock:
+            with self._connect() as connection:
+                duplicate = connection.execute(
+                    "SELECT id FROM pronunciation_entries "
+                    "WHERE word = ? COLLATE NOCASE AND id != ?",
+                    (cleaned_word, str(entry_id)),
+                ).fetchone()
+
+                if duplicate is not None:
+                    raise AppError(
+                        f"'{cleaned_word}' already has a pronunciation rule.",
+                        code="duplicate_word",
+                        status=409,
+                    )
+
+                cursor = connection.execute(
+                    "UPDATE pronunciation_entries SET word = ?, pronunciation = ?, "
+                    "description = ?, updated_at = ? WHERE id = ?",
+                    (
+                        cleaned_word,
+                        cleaned_pronunciation,
+                        (description or "").strip()[:200] or None,
+                        _now(),
+                        str(entry_id),
+                    ),
+                )
+
+                if cursor.rowcount == 0:
+                    raise AppError(
+                        "Pronunciation entry not found.",
+                        code="entry_not_found",
+                        status=404,
+                    )
+
+        return self.get_pronunciation(entry_id)
+
+    def delete_pronunciation(self, entry_id: str) -> dict:
+        self.get_pronunciation(entry_id)
+
+        with self._lock:
+            with self._connect() as connection:
+                connection.execute(
+                    "DELETE FROM pronunciation_entries WHERE id = ?",
+                    (str(entry_id),),
+                )
+
+        return {"id": str(entry_id)}
+
+    # ------------------------------------------------------------------
+    # Voice presets
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _validate_preset(
+        name: object,
+        engine: object,
+        voice: object,
+        speed: object,
+    ) -> tuple[str, str, str | None, float | None]:
+        if not isinstance(name, str) or not name.strip():
+            raise AppError("Enter a preset name.", code="invalid_preset_name")
+
+        cleaned_name = " ".join(name.split()).strip()
+
+        if len(cleaned_name) > MAX_PRESET_NAME:
+            raise AppError(
+                f"The preset name is too long ({len(cleaned_name)} characters). "
+                f"The limit is {MAX_PRESET_NAME}.",
+                code="invalid_preset_name",
+            )
+
+        if engine not in PRESET_ENGINES:
+            raise AppError(
+                f"Unknown engine {engine!r}.",
+                code="invalid_engine",
+            )
+
+        if engine == "kokoro":
+            selected_voice = voice or DEFAULT_VOICE
+
+            if selected_voice not in KOKORO_VOICES:
+                raise AppError(
+                    f"Unknown Kokoro voice {selected_voice!r}.",
+                    code="invalid_voice",
+                )
+
+            try:
+                selected_speed = validate_speed(
+                    DEFAULT_SPEED if speed is None else speed
+                )
+            except ValueError as error:
+                raise AppError(str(error), code="invalid_speed") from error
+        else:
+            # The custom engine has no voice choice and no speed control.
+            selected_voice = None
+            selected_speed = None
+
+        return cleaned_name, engine, selected_voice, selected_speed
+
+    def list_presets(self) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM voice_presets ORDER BY name COLLATE NOCASE ASC"
+            ).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def get_preset(self, preset_id: str) -> dict:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM voice_presets WHERE id = ?",
+                (str(preset_id),),
+            ).fetchone()
+
+        if row is None:
+            raise AppError(
+                "Preset not found.",
+                code="preset_not_found",
+                status=404,
+            )
+
+        return dict(row)
+
+    def create_preset(
+        self,
+        name: object,
+        engine: object,
+        voice: object = None,
+        speed: object = None,
+        description: str | None = None,
+    ) -> dict:
+        cleaned_name, cleaned_engine, selected_voice, selected_speed = (
+            self._validate_preset(name, engine, voice, speed)
+        )
+
+        preset_id = uuid.uuid4().hex
+        timestamp = _now()
+
+        with self._lock:
+            with self._connect() as connection:
+                duplicate = connection.execute(
+                    "SELECT id FROM voice_presets WHERE name = ? COLLATE NOCASE",
+                    (cleaned_name,),
+                ).fetchone()
+
+                if duplicate is not None:
+                    raise AppError(
+                        f"A preset named '{cleaned_name}' already exists.",
+                        code="duplicate_preset",
+                        status=409,
+                    )
+
+                connection.execute(
+                    "INSERT INTO voice_presets "
+                    "(id, name, engine, voice, speed, description, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        preset_id,
+                        cleaned_name,
+                        cleaned_engine,
+                        selected_voice,
+                        selected_speed,
+                        (description or "").strip()[:200] or None,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+
+        return self.get_preset(preset_id)
+
+    def update_preset(
+        self,
+        preset_id: str,
+        name: object,
+        engine: object,
+        voice: object = None,
+        speed: object = None,
+        description: str | None = None,
+    ) -> dict:
+        self.get_preset(preset_id)
+        cleaned_name, cleaned_engine, selected_voice, selected_speed = (
+            self._validate_preset(name, engine, voice, speed)
+        )
+
+        with self._lock:
+            with self._connect() as connection:
+                duplicate = connection.execute(
+                    "SELECT id FROM voice_presets "
+                    "WHERE name = ? COLLATE NOCASE AND id != ?",
+                    (cleaned_name, str(preset_id)),
+                ).fetchone()
+
+                if duplicate is not None:
+                    raise AppError(
+                        f"A preset named '{cleaned_name}' already exists.",
+                        code="duplicate_preset",
+                        status=409,
+                    )
+
+                cursor = connection.execute(
+                    "UPDATE voice_presets SET name = ?, engine = ?, voice = ?, "
+                    "speed = ?, description = ?, updated_at = ? WHERE id = ?",
+                    (
+                        cleaned_name,
+                        cleaned_engine,
+                        selected_voice,
+                        selected_speed,
+                        (description or "").strip()[:200] or None,
+                        _now(),
+                        str(preset_id),
+                    ),
+                )
+
+                if cursor.rowcount == 0:
+                    raise AppError(
+                        "Preset not found.",
+                        code="preset_not_found",
+                        status=404,
+                    )
+
+        return self.get_preset(preset_id)
+
+    def delete_preset(self, preset_id: str) -> dict:
+        self.get_preset(preset_id)
+
+        with self._lock:
+            with self._connect() as connection:
+                connection.execute(
+                    "DELETE FROM voice_presets WHERE id = ?",
+                    (str(preset_id),),
+                )
+
+        return {"id": str(preset_id)}

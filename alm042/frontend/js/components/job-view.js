@@ -5,6 +5,10 @@
  */
 
 import {
+  buildJobItemMp3Url,
+  buildJobZipUrl,
+} from "../advanced-state.js";
+import {
   completedItems,
   formatProgress,
   statusLabel,
@@ -59,11 +63,17 @@ export function createJobView({ title = "Results" } = {}) {
   zipLink.setAttribute("download", "");
   zipLink.hidden = true;
 
-  actions.append(zipLink);
+  const mp3ZipLink = document.createElement("a");
+  mp3ZipLink.className = "button button-ghost";
+  mp3ZipLink.textContent = "\u2b07 Download MP3 ZIP";
+  mp3ZipLink.setAttribute("download", "");
+  mp3ZipLink.hidden = true;
+
+  actions.append(zipLink, mp3ZipLink);
   body.append(summary, list, actions);
   panel.append(head, body);
 
-  function renderItem(item) {
+  function renderItem(item, job) {
     const row = document.createElement("div");
     row.className = "job-item";
     row.dataset.status = item.status;
@@ -109,7 +119,13 @@ export function createJobView({ title = "Results" } = {}) {
       download.setAttribute("download", item.filename || "");
       download.textContent = "WAV";
 
-      tools.append(audio, download);
+      const mp3 = document.createElement("a");
+      mp3.className = "button button-ghost";
+      mp3.href = buildJobItemMp3Url(job.id, item.id);
+      mp3.setAttribute("download", "");
+      mp3.textContent = "MP3";
+
+      tools.append(audio, download, mp3);
       row.append(tools);
     }
 
@@ -129,13 +145,16 @@ export function createJobView({ title = "Results" } = {}) {
       }
 
       list.replaceChildren(
-        ...job.items.map((item) => renderItem(item)),
+        ...job.items.map((item) => renderItem(item, job)),
       );
 
       const results = completedItems(job);
 
       zipLink.hidden = results.length === 0;
       zipLink.href = job.download_url || "#";
+
+      mp3ZipLink.hidden = results.length === 0;
+      mp3ZipLink.href = buildJobZipUrl(job.id, "mp3");
 
       return job;
     },

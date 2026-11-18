@@ -12,6 +12,10 @@
 import { ApiError, generateSpeech } from "../api.js";
 import { createAudioPanel } from "../components/audio-player.js";
 import { createJobView } from "../components/job-view.js";
+import {
+  createPresetSelect,
+  createPronunciationToggle,
+} from "../components/generation-extras.js";
 import { MAX_ENTRY_CHARS } from "../batch-state.js";
 import {
   describeSpeed,
@@ -215,6 +219,28 @@ export function createStudioPage({ capabilities, notifications }) {
   speedScale.append(slow, fast);
   speedField.append(speedLabelRow, speedInput, speedScale);
 
+  const presetField = createPresetSelect({
+    capabilities,
+    notifications,
+    onApply: ({ engine, voice, speed }) => {
+      engineSelect.value = engine;
+      syncVisibility();
+
+      if (voice) {
+        voiceSelect.value = voice;
+      }
+
+      if (typeof speed === "number") {
+        speedInput.value = speed;
+        updateSpeedLabel();
+      }
+
+      setBusy(gate.isRunning);
+    },
+  });
+
+  const pronunciationToggle = createPronunciationToggle();
+
   const speedNote = document.createElement("p");
   speedNote.className = "field-note";
   speedNote.id = "speed-note";
@@ -262,6 +288,8 @@ export function createStudioPage({ capabilities, notifications }) {
     selectors,
     speedField,
     speedNote,
+    presetField.element,
+    pronunciationToggle.element,
     examples,
     actions,
   );
@@ -373,6 +401,7 @@ export function createStudioPage({ capabilities, notifications }) {
         engine,
         voice,
         speed,
+        pronunciation: pronunciationToggle.enabled,
       });
 
       audioPanel.show(result, {
@@ -411,6 +440,7 @@ export function createStudioPage({ capabilities, notifications }) {
     const payload = {
       type: "long_text",
       engine,
+      pronunciation: pronunciationToggle.enabled,
       items: [{ name: "Long text", text }],
     };
 

@@ -7,6 +7,7 @@
 
 import { ApiError, fetchEngineInfo } from "./api.js";
 import { createNotifications } from "./components/notifications.js";
+import { createBatchPage } from "./pages/batch.js";
 import { createComingSoonPage } from "./pages/coming-soon.js";
 import { createStudioPage } from "./pages/studio.js";
 import { createStore } from "./state.js";
@@ -35,10 +36,8 @@ const NAV_ITEMS = [
     label: "Batch Studio",
     icon: "\u25a4",
     title: "Batch Studio",
-    subtitle: "Generate many sentences in a single run.",
-    kind: "soon",
-    description:
-      "Batch Studio will queue multiple sentences, report progress per item and bundle the results for download.",
+    subtitle: "Generate several entries at once and download them as a ZIP.",
+    kind: "batch",
   },
   {
     id: "library",
@@ -90,6 +89,17 @@ const store = createStore({ capabilities: null, page: "studio", error: null });
 
 let studioPage = null;
 let studioHost = null;
+let batchPage = null;
+let batchHost = null;
+let activePage = null;
+
+function mountPage(page) {
+  if (activePage && activePage !== page) {
+    activePage.deactivate?.();
+  }
+
+  activePage = page;
+}
 
 function currentItem() {
   const { page } = store.get();
@@ -172,7 +182,6 @@ function renderBadges() {
 
   const defaultId = capabilities.default;
   const defaultName = capabilities.engines?.[defaultId]?.name;
-  const maxLength = capabilities.limits?.max_text_length;
 
   if (defaultName) {
     const engineBadge = document.createElement("span");
@@ -181,12 +190,8 @@ function renderBadges() {
     dom.badges.append(engineBadge);
   }
 
-  if (maxLength) {
-    const limitBadge = document.createElement("span");
-    limitBadge.className = "badge";
-    limitBadge.textContent = `${maxLength} character limit`;
-    dom.badges.append(limitBadge);
-  }
+  // The short-text limit only applies to Speech Studio, so it is shown
+  // there by the character counter rather than as a global badge.
 }
 
 function renderErrorState(error) {
@@ -255,9 +260,32 @@ function renderPage() {
       studioHost.append(studioPage.element);
     }
 
+    mountPage(studioPage);
     dom.pageRoot.replaceChildren(studioHost);
     return;
   }
+
+  if (item.kind === "batch") {
+    if (!capabilities) {
+      dom.pageRoot.replaceChildren(
+        error ? renderErrorState(error) : renderLoadingState(),
+      );
+      return;
+    }
+
+    if (!batchPage) {
+      batchPage = createBatchPage({ capabilities, notifications });
+      batchHost = document.createElement("div");
+      batchHost.append(batchPage.element);
+    }
+
+    mountPage(batchPage);
+    dom.pageRoot.replaceChildren(batchHost);
+    return;
+  }
+
+  mountPage(null);
+
 
   const page = createComingSoonPage({
     title: item.title,

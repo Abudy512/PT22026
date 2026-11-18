@@ -49,3 +49,40 @@ export function resolveKeyAction(event, text) {
 
   return KeyAction.GENERATE;
 }
+
+/**
+ * Keyboard behaviour for the long-text composer, where Enter must insert a
+ * newline and Ctrl/Cmd + Enter submits.
+ *
+ * @param {{key: string, shiftKey?: boolean, ctrlKey?: boolean,
+ *          metaKey?: boolean, altKey?: boolean, isComposing?: boolean,
+ *          keyCode?: number}} event
+ * @param {string} text
+ * @returns {"generate" | "newline" | "ignore"}
+ */
+export function resolveLongTextKey(event, text) {
+  if (!event || event.key !== "Enter") {
+    return KeyAction.IGNORE;
+  }
+
+  if (event.isComposing || event.keyCode === 229) {
+    return KeyAction.IGNORE;
+  }
+
+  const submits = Boolean(event.ctrlKey || event.metaKey);
+
+  if (!submits) {
+    // Plain Enter (and Shift+Enter) stay as newlines.
+    return KeyAction.NEWLINE;
+  }
+
+  if (event.shiftKey || event.altKey) {
+    return KeyAction.IGNORE;
+  }
+
+  if (typeof text !== "string" || text.trim() === "") {
+    return KeyAction.IGNORE;
+  }
+
+  return KeyAction.GENERATE;
+}

@@ -6,13 +6,15 @@ the 82M model or touches the Hugging Face cache.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import urllib.error
+import zipfile
 
 import pytest
 
-from conftest import error_payload, http_get, http_post_json
+from conftest import error_payload, http_get, http_post_json, wait_for_job
 
 RUN_REAL = os.environ.get("VOICEFORGE_TEST_KOKORO") == "1"
 
@@ -115,3 +117,73 @@ def test_kokoro_speed_actually_changes_duration(server):
             audio = response.read()
         assert audio[:4] == b"RIFF"
         assert len(audio) > 1000
+
+
+def test_kokoro_long_text_job_and_zip(server):
+    """Real model: multi-chunk long text, joined WAV and ZIP contents."""
+
+    text = " ".join(
+        ["The quick brown fox jumps over the lazy dog."] * 12
+    )
+
+    payload = {
+        "type": "long_text",
+        "engine": "kokoro",
+        "voice": "af_heart",
+        "speed": 1.0,
+        "items": [{"name": "Long text", "text": text}],
+    }
+
+    with http_post_json(server + "/api/jobs", payload) as response:
+        job_id = json.loads(response.read())["job"]["id"]
+
+    job = wait_for_job(server, job_id, timeout=300)
+
+    assert job["status"] == "completed"
+    item = job["items"][0]
+    assert item["status"] == "completed"
+    assert item["chunks_total"] >= 2
+    assert item["chunks_completed"] == item["chunks_total"]
+
+    with http_get(server + item["download_url"]) as response:
+        audio = response.read()
+
+    assert audio[:4] == b"RIFF"
+    assert len(audio) > 5000
+
+    with http_get(f"{server}/api/jobs/{job_id}/download") as response:
+        archive = response.read()
+
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        names = bundle.namelist()
+        manifest = json.loads(bundle.read("manifest.json"))
+
+    assert "manifest.json" in names
+    assert sum(name.endswith(".wav") for name in names) == 1
+    assert manifest["completed"] == 1
+
+
+def test_kokoro_batch_job_with_two_entries(server):
+    payload = {
+        "type": "batch",
+        "engine": "kokoro",
+        "voice": "am_michael",
+        "speed": 1.25,
+        "items": [
+            {"name": "First", "text": "Hello from the first batch entry."},
+            {"name": "Second", "text": "And this is the second entry."},
+        ],
+    }
+
+    with http_post_json(server + "/api/jobs", payload) as response:
+        job_id = json.loads(response.read())["job"]["id"]
+
+    job = wait_for_job(server, job_id, timeout=300)
+
+    assert job["status"] == "completed"
+    assert job["completed"] == 2
+    assert job["speed"] == 1.25
+
+    for item in job["items"]:
+        with http_get(server + item["download_url"]) as response:
+            assert response.read()[:4] == b"RIFF"

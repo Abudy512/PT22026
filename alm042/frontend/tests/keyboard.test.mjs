@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { KeyAction, resolveKeyAction } from "../js/keyboard.js";
+import { KeyAction, resolveKeyAction, resolveLongTextKey } from "../js/keyboard.js";
 
 const enter = (overrides = {}) => ({
   key: "Enter",
@@ -62,4 +62,67 @@ test("non-Enter keys are ignored", () => {
 
 test("missing event is ignored", () => {
   assert.equal(resolveKeyAction(null, "Hello"), KeyAction.IGNORE);
+});
+
+
+// --- Long-text mode ------------------------------------------------------
+
+const longEnter = (overrides = {}) => ({
+  key: "Enter",
+  shiftKey: false,
+  ctrlKey: false,
+  metaKey: false,
+  altKey: false,
+  isComposing: false,
+  ...overrides,
+});
+
+test("long mode: Enter inserts a newline", () => {
+  assert.equal(resolveLongTextKey(longEnter(), "Hello"), KeyAction.NEWLINE);
+});
+
+test("long mode: Shift+Enter inserts a newline", () => {
+  assert.equal(
+    resolveLongTextKey(longEnter({ shiftKey: true }), "Hello"),
+    KeyAction.NEWLINE,
+  );
+});
+
+test("long mode: Ctrl+Enter submits", () => {
+  assert.equal(
+    resolveLongTextKey(longEnter({ ctrlKey: true }), "Hello"),
+    KeyAction.GENERATE,
+  );
+});
+
+test("long mode: Cmd+Enter submits", () => {
+  assert.equal(
+    resolveLongTextKey(longEnter({ metaKey: true }), "Hello"),
+    KeyAction.GENERATE,
+  );
+});
+
+test("long mode: Ctrl+Enter with empty text does nothing", () => {
+  assert.equal(
+    resolveLongTextKey(longEnter({ ctrlKey: true }), "   "),
+    KeyAction.IGNORE,
+  );
+});
+
+test("long mode: IME composition is ignored", () => {
+  assert.equal(
+    resolveLongTextKey(longEnter({ isComposing: true }), "Hello"),
+    KeyAction.IGNORE,
+  );
+});
+
+test("long mode: Ctrl+Shift+Enter is not a submit", () => {
+  assert.equal(
+    resolveLongTextKey(longEnter({ ctrlKey: true, shiftKey: true }), "Hello"),
+    KeyAction.IGNORE,
+  );
+});
+
+test("long mode: other keys are ignored", () => {
+  assert.equal(resolveLongTextKey(longEnter({ key: "a" }), "Hello"), KeyAction.IGNORE);
 });

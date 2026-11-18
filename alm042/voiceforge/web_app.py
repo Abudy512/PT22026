@@ -27,6 +27,13 @@ from voiceforge.app_core import (
     AppError,
     VoiceForgeApp,
 )
+from voiceforge.jobs import (
+    ArchiveUnavailable,
+    JobManager,
+    JobNotFound,
+    JobQueueFull,
+)
+from voiceforge.uploads import validate_uploads
 
 #: Static frontend root (``alm042/frontend``).
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
@@ -50,12 +57,12 @@ STATIC_MIME_TYPES = {
     ".woff2": "font/woff2",
 }
 
-#: Refuse request bodies larger than this (text is limited to 400 chars).
-MAX_BODY_BYTES = 64 * 1024
+#: Extra headroom for base64 uploads (5 MB decoded is ~6.7 MB encoded).
+MAX_BODY_BYTES = 8 * 1024 * 1024
 
 
 class VoiceForgeServer(ThreadingHTTPServer):
-    """HTTP server that carries the application instance."""
+    """HTTP server that carries the application and job manager."""
 
     daemon_threads = True
 
@@ -63,9 +70,18 @@ class VoiceForgeServer(ThreadingHTTPServer):
         self,
         server_address: tuple[str, int],
         app: VoiceForgeApp,
+        jobs: JobManager | None = None,
     ):
         super().__init__(server_address, VoiceForgeHandler)
         self.app = app
+        self.jobs = jobs if jobs is not None else JobManager(app)
+
+    def server_close(self) -> None:
+        try:
+            super().server_close()
+        finally:
+            # Stop the worker and fail anything still queued.
+            self.jobs.stop()
 
 
 class VoiceForgeHandler(BaseHTTPRequestHandler):
@@ -152,7 +168,11 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
             raise AppError("The request was empty.")
 
         if length > MAX_BODY_BYTES:
-            raise AppError("The request is too large.")
+            raise AppError(
+                "The request is too large.",
+                code="request_too_large",
+                status=413,
+            )
 
         raw = self.rfile.read(length)
 
@@ -207,6 +227,10 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
                 200,
                 {"ok": True, **self.app.describe_engine_details()},
             )
+            return
+
+        if path.startswith("/api/jobs/"):
+            self._handle_job_get(path[len("/api/jobs/"):])
             return
 
         if path.startswith("/audio/"):
@@ -295,11 +319,116 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
     def _handle_post(self) -> None:
         path = self.path.split("?", 1)[0]
 
-        if path not in ("/generate", "/api/generate"):
-            self._send_error_json(404, "Page not found.", "not_found")
+        if path in ("/generate", "/api/generate"):
+            self._handle_generate()
             return
 
-        self._handle_generate()
+        if path == "/api/jobs":
+            self._handle_submit_job()
+            return
+
+        if path == "/api/uploads":
+            self._handle_upload()
+            return
+
+        self._send_error_json(404, "Page not found.", "not_found")
+
+    # ------------------------------------------------------------------
+    # Jobs and uploads
+    # ------------------------------------------------------------------
+    def _handle_submit_job(self) -> None:
+        try:
+            payload = self._read_json_body()
+            job = self.server.jobs.submit(  # type: ignore[attr-defined]
+                payload
+            )
+        except AppError as error:
+            self._send_app_error(error)
+            return
+        except JobQueueFull as error:
+            self._send_error_json(429, str(error), "queue_full")
+            return
+
+        self._send_json(202, {"ok": True, "job": job.to_dict()})
+
+    def _handle_job_get(self, remainder: str) -> None:
+        parts = [part for part in remainder.split("/") if part]
+
+        if not parts:
+            self._send_error_json(404, "Job not found.", "job_not_found")
+            return
+
+        job_id = parts[0]
+        jobs = self.server.jobs  # type: ignore[attr-defined]
+
+        try:
+            if len(parts) == 1:
+                self._send_json(200, {"ok": True, "job": jobs.get(job_id).to_dict()})
+                return
+
+            if len(parts) == 2 and parts[1] == "download":
+                archive, download_name = jobs.archive(job_id)
+
+                self._send_bytes(
+                    200,
+                    archive,
+                    "application/zip",
+                    {
+                        "Content-Disposition": (
+                            f'attachment; filename="{download_name}"'
+                        )
+                    },
+                )
+                return
+
+            if len(parts) == 3 and parts[1] == "audio":
+                try:
+                    item_path = jobs.item_file(job_id, parts[2])
+                except FileNotFoundError:
+                    self._send_error_json(
+                        404,
+                        "Audio not found.",
+                        "audio_not_found",
+                    )
+                    return
+
+                self._send_bytes(
+                    200,
+                    item_path.read_bytes(),
+                    "audio/wav",
+                    {
+                        "Content-Disposition": (
+                            f'attachment; filename="{item_path.name}"'
+                        )
+                    },
+                )
+                return
+
+        except JobNotFound:
+            self._send_error_json(404, "Job not found.", "job_not_found")
+            return
+        except ArchiveUnavailable as error:
+            self._send_error_json(409, str(error), "no_results")
+            return
+
+        self._send_error_json(404, "Job not found.", "job_not_found")
+
+    def _handle_upload(self) -> None:
+        try:
+            payload = self._read_json_body()
+            files = validate_uploads(payload)
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "files": files,
+                "count": len(files),
+            },
+        )
 
     def _handle_generate(self) -> None:
         """
@@ -345,10 +474,11 @@ def create_server(
     app: VoiceForgeApp,
     host: str = "127.0.0.1",
     port: int = 7860,
+    jobs: JobManager | None = None,
 ) -> VoiceForgeServer:
     """Create (but do not start) the VoiceForge HTTP server."""
 
-    return VoiceForgeServer((host, port), app)
+    return VoiceForgeServer((host, port), app, jobs=jobs)
 
 
 def run(

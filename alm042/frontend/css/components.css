@@ -483,3 +483,164 @@
     width: 100%;
   }
 }
+
+
+/* --- Segmented control ---------------------------------------------------- */
+
+.segmented {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.segment {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 7px 15px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.segment:hover:not(.is-active):not(:disabled) {
+  color: var(--text);
+}
+
+.segment.is-active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.segment:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.badge-danger {
+  color: #ffd0d8;
+  border-color: rgba(255, 95, 122, 0.4);
+  background: var(--danger-soft);
+}
+
+/* --- Batch Studio --------------------------------------------------------- */
+
+.batch-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.85fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.batch-toolbar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.batch-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.batch-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(13, 20, 29, 0.5);
+}
+
+.batch-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.batch-entry-head .input {
+  flex: 1;
+}
+
+.batch-entry-text {
+  min-height: 110px;
+}
+
+/* --- Job view ------------------------------------------------------------- */
+
+.job-summary {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.job-items {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.job-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(13, 20, 29, 0.55);
+}
+
+.job-item[data-status="completed"] {
+  border-color: rgba(52, 201, 138, 0.3);
+}
+
+.job-item[data-status="failed"] {
+  border-color: rgba(255, 95, 122, 0.35);
+}
+
+.job-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.job-item-name {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.job-item-meta {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.job-item-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.job-item-audio {
+  flex: 1;
+  min-width: 220px;
+  height: 34px;
+}
+
+@media (max-width: 1080px) {
+  .batch-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

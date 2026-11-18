@@ -30,7 +30,7 @@ VoiceForge is a university project with **two speech engines**:
 | Main engine | Kokoro-82M (pretrained, Apache-2.0) |
 | Custom model | Tacotron-lite, 2,997,410 parameters |
 | Dataset (custom model) | LJSpeech 1.1 (13,100 clips, single speaker, 22,050 Hz) |
-| Tests | 77 automated tests (48 Python + 29 JavaScript), plus 7 optional real-Kokoro tests |
+| Tests | 167 automated tests (105 Python + 62 JavaScript), plus 9 optional real-Kokoro tests |
 
 ---
 
@@ -433,6 +433,43 @@ Everything runs locally; no text or audio leaves the machine.
 | POST | `/generate` | `{text, engine, voice?, speed?}` | Legacy generation endpoint |
 | POST | `/api/generate` | `{text, engine, voice?, speed?}` | Generation endpoint (same implementation) |
 | GET | `/audio/<file>` | — | Playback and download |
+| POST | `/api/jobs` | `{type, items, engine, voice?, speed?}` | Queue a long-text or batch job |
+| GET | `/api/jobs/{id}` | — | Job and per-item status |
+| GET | `/api/jobs/{id}/audio/{item}` | — | One completed item (WAV) |
+| GET | `/api/jobs/{id}/download` | — | ZIP with all completed audio + manifest |
+| POST | `/api/uploads` | `{files: [{name, data_base64}]}` | Validate and decode `.txt` uploads |
+
+### Long text, batches and uploads
+
+- **Long Text** (Speech Studio → *Long text*): text up to **20,000
+  characters**, split at sentence boundaries and synthesised as a background
+  job, then joined into one WAV with a 150 ms gap between chunks.
+- **Batch Studio**: up to **20 entries** of 20,000 characters each, one job,
+  per-item progress, individual WAV downloads and a ZIP with a manifest.
+- **TXT upload**: up to **20 files**, **1 MB per file**, **5 MB total**,
+  UTF-8 (BOM tolerated). Extensions and encoding are validated on the server;
+  uploaded names are sanitised and never used as paths.
+- **Jobs**: one worker, at most **4 active jobs**; extra submissions get a
+  `429 queue_full`. Statuses are `queued`, `running`, `completed`, `failed`.
+  Progress is real item counts (no percentages). Jobs live in memory only.
+
+```json
+POST /api/jobs
+{
+  "type": "batch",
+  "engine": "kokoro",
+  "voice": "af_heart",
+  "speed": 1.0,
+  "items": [
+    {"name": "Welcome", "text": "Welcome to VoiceForge."},
+    {"name": "Intro", "text": "This is a longer introduction."}
+  ]
+}
+
+202
+{"ok": true, "job": {"id": "a447111fee72", "status": "queued", "total": 2,
+ "completed": 0, "failed": 0, "download_url": null, "items": [...]}}
+```
 
 ```json
 // POST /api/generate
@@ -511,8 +548,8 @@ node --test frontend/tests
 ```
 
 ```
-48 passed, 4 skipped        # Python (the 4 skipped are optional real-Kokoro tests)
-29 passed                   # JavaScript
+105 passed, 9 skipped       # Python (the 9 skipped are optional real-Kokoro tests)
+62 passed                   # JavaScript
 ```
 
 The optional Kokoro API tests load the real 82M model, so they are gated:
@@ -539,6 +576,19 @@ python -m scripts.check_audio --checkpoint checkpoints/voiceforge_attn.pt
 ```
 
 ## 13. Known limitations
+
+### Jobs and batch processing
+
+1. **In-memory jobs.** Job state is not persisted; restarting the server
+   clears completed jobs (finished WAVs stay on disk under `outputs/jobs/`).
+2. **One worker, four jobs.** Jobs run one at a time; the queue rejects the
+   fifth active job with `429 queue_full`.
+3. **No cancellation.** A running job cannot be stopped from the UI.
+4. **20,000 characters per item**, 20 items per job.
+5. **ZIP is built in memory** — fine for the current limits, not for very
+   large batches.
+6. **Long text is split at sentences** and joined; prosody resets at each
+   chunk, so a long passage may sound slightly segmented.
 
 ### Kokoro-82M (main engine)
 

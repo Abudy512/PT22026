@@ -1,13 +1,18 @@
 /**
  * Speech Studio page.
  *
- * Builds the composer, validates input, calls the API and renders the
- * result. All speech logic stays in the Python backend (`app_core.py`), and
- * every control (engines, voices, speed range) comes from `/api/engines`.
+ * Two modes share one composer:
+ *   - Short text: single request, Enter generates (Shift+Enter = newline).
+ *   - Long text: background job with chunked synthesis,
+ *     Ctrl/Cmd+Enter submits (Enter = newline).
+ *
+ * Engines, voices, speed ranges and limits come from `/api/engines`.
  */
 
 import { ApiError, generateSpeech } from "../api.js";
 import { createAudioPanel } from "../components/audio-player.js";
+import { createJobView } from "../components/job-view.js";
+import { MAX_ENTRY_CHARS } from "../batch-state.js";
 import {
   describeSpeed,
   describeVoice,
@@ -17,7 +22,8 @@ import {
   voiceControlsVisible,
   voiceForRequest,
 } from "../engine-ui.js";
-import { KeyAction, resolveKeyAction } from "../keyboard.js";
+import { createJobPoller, submitJob } from "../jobs.js";
+import { KeyAction, resolveKeyAction, resolveLongTextKey } from "../keyboard.js";
 import { createGenerationGate } from "../state.js";
 import {
   DEFAULT_MAX_LENGTH,
@@ -46,7 +52,7 @@ function fieldLabel(text, targetId) {
 export function createStudioPage({ capabilities, notifications }) {
   const engines = capabilities.engines || {};
   const defaultEngine = capabilities.default;
-  const maxLength = capabilities.limits?.max_text_length || DEFAULT_MAX_LENGTH;
+  const shortLimit = capabilities.limits?.max_text_length || DEFAULT_MAX_LENGTH;
 
   const kokoro = engines.kokoro || {};
   const kokoroVoices = kokoro.voices || [];
@@ -57,6 +63,12 @@ export function createStudioPage({ capabilities, notifications }) {
   );
 
   const gate = createGenerationGate();
+
+  let mode = "short";
+  let poller = null;
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "stack";
 
   const grid = document.createElement("div");
   grid.className = "studio-grid";
@@ -74,13 +86,31 @@ export function createStudioPage({ capabilities, notifications }) {
   const composerBody = document.createElement("div");
   composerBody.className = "panel-body stack";
 
+  const modeBar = document.createElement("div");
+  modeBar.className = "segmented";
+  modeBar.setAttribute("role", "group");
+  modeBar.setAttribute("aria-label", "Text mode");
+
+  const shortModeButton = document.createElement("button");
+  shortModeButton.type = "button";
+  shortModeButton.className = "segment is-active";
+  shortModeButton.dataset.mode = "short";
+  shortModeButton.textContent = "Short text";
+
+  const longModeButton = document.createElement("button");
+  longModeButton.type = "button";
+  longModeButton.className = "segment";
+  longModeButton.dataset.mode = "long";
+  longModeButton.textContent = "Long text";
+
+  modeBar.append(shortModeButton, longModeButton);
+
   const textField = document.createElement("div");
   textField.className = "field";
 
   const textarea = document.createElement("textarea");
   textarea.className = "textarea";
   textarea.id = "speech-text";
-  textarea.maxLength = maxLength;
   textarea.placeholder = "Type or paste a sentence, for example: Welcome to VoiceForge.";
   textarea.setAttribute("aria-describedby", "composer-hint");
 
@@ -91,11 +121,9 @@ export function createStudioPage({ capabilities, notifications }) {
 
   const hint = document.createElement("span");
   hint.id = "composer-hint";
-  hint.textContent = "Press Enter to generate \u00b7 Shift + Enter for a new line";
 
   const counter = document.createElement("span");
   counter.className = "counter";
-  counter.textContent = `0 / ${maxLength}`;
 
   metaRow.append(hint, counter);
 
@@ -228,6 +256,7 @@ export function createStudioPage({ capabilities, notifications }) {
   }
 
   composerBody.append(
+    modeBar,
     textField,
     metaRow,
     selectors,
@@ -240,11 +269,57 @@ export function createStudioPage({ capabilities, notifications }) {
 
   // --- Output -----------------------------------------------------------
   const audioPanel = createAudioPanel();
+  const jobView = createJobView({ title: "Long text progress" });
+
   const side = document.createElement("div");
   side.className = "stack";
   side.append(audioPanel.element);
 
   grid.append(composer, side);
+  wrapper.append(grid, jobView.element);
+
+  // --- Mode -------------------------------------------------------------
+  function currentLimit() {
+    return mode === "long" ? MAX_ENTRY_CHARS : shortLimit;
+  }
+
+  function updateModeUi() {
+    const long = mode === "long";
+
+    textarea.maxLength = currentLimit();
+    textarea.placeholder = long
+      ? "Paste a long text. It will be split into sentences and synthesised as a background job."
+      : "Type or paste a sentence, for example: Welcome to VoiceForge.";
+
+    hint.textContent = long
+      ? "Ctrl + Enter to generate \u00b7 Enter for a new line"
+      : "Press Enter to generate \u00b7 Shift + Enter for a new line";
+
+    generateButton.lastChild.textContent = long
+      ? "Generate long text"
+      : "Generate speech";
+
+    shortModeButton.classList.toggle("is-active", !long);
+    longModeButton.classList.toggle("is-active", long);
+
+    examples.hidden = long;
+
+    if (!long) {
+      jobView.clear();
+    }
+
+    updateCounter();
+  }
+
+  shortModeButton.addEventListener("click", () => {
+    mode = "short";
+    updateModeUi();
+  });
+
+  longModeButton.addEventListener("click", () => {
+    mode = "long";
+    updateModeUi();
+  });
 
   // --- Behaviour --------------------------------------------------------
   function syncVisibility() {
@@ -265,9 +340,10 @@ export function createStudioPage({ capabilities, notifications }) {
 
   function updateCounter() {
     const count = countCharacters(textarea.value);
-    const state = counterState(count, maxLength);
+    const limit = currentLimit();
+    const state = counterState(count, limit);
 
-    counter.textContent = `${count} / ${maxLength}`;
+    counter.textContent = `${count} / ${limit}`;
     counter.classList.toggle("is-warning", state === "warning");
     counter.classList.toggle("is-over", state === "over");
   }
@@ -279,38 +355,21 @@ export function createStudioPage({ capabilities, notifications }) {
     voiceSelect.disabled = busy || !voiceControlsVisible(engineSelect.value);
     speedInput.disabled = busy || !speedControlVisible(engineSelect.value);
     textarea.readOnly = busy;
-    generateButton.lastChild.textContent = busy
-      ? "Generating\u2026"
-      : "Generate speech";
+    shortModeButton.disabled = busy;
+    longModeButton.disabled = busy;
+
+    if (!busy) {
+      generateButton.lastChild.textContent =
+        mode === "long" ? "Generate long text" : "Generate speech";
+    } else {
+      generateButton.lastChild.textContent = "Working\u2026";
+    }
   }
 
-  /**
-   * The single generation entry point. The button and the Enter key both
-   * call this; the gate guarantees one request at a time.
-   */
-  async function startGeneration() {
-    if (!gate.tryStart()) {
-      return;
-    }
-
-    const validation = validateText(textarea.value, maxLength);
-
-    if (!validation.ok) {
-      gate.finish();
-      notifications.error(validation.error);
-      textarea.focus();
-      return;
-    }
-
-    const engine = engineSelect.value;
-    const voice = voiceForRequest(engine, voiceSelect.value);
-    const speed = speedForRequest(engine, speedInput.value);
-
-    setBusy(true);
-
+  async function startShortGeneration(engine, voice, speed) {
     try {
       const result = await generateSpeech({
-        text: validation.text,
+        text: textarea.value,
         engine,
         voice,
         speed,
@@ -326,12 +385,123 @@ export function createStudioPage({ capabilities, notifications }) {
         `Generated ${result.duration_seconds.toFixed(2)} s of audio.`,
       );
     } catch (error) {
-      const message =
+      notifications.error(
         error instanceof ApiError
           ? error.message
-          : "Speech generation failed unexpectedly.";
+          : "Speech generation failed unexpectedly.",
+      );
+    }
+  }
 
-      notifications.error(message);
+  async function startLongGeneration(engine, voice, speed) {
+    const text = textarea.value.trim();
+
+    if (!text) {
+      notifications.error("Enter some text before generating speech.");
+      return;
+    }
+
+    if (text.length > MAX_ENTRY_CHARS) {
+      notifications.error(
+        `Text is too long (${text.length} characters). The limit is ${MAX_ENTRY_CHARS}.`,
+      );
+      return;
+    }
+
+    const payload = {
+      type: "long_text",
+      engine,
+      items: [{ name: "Long text", text }],
+    };
+
+    if (voice) {
+      payload.voice = voice;
+    }
+
+    if (typeof speed === "number") {
+      payload.speed = speed;
+    }
+
+    jobView.clear();
+
+    try {
+      const job = await submitJob(payload);
+      jobView.render(job);
+      notifications.info("Long-text job queued.");
+
+      poller = createJobPoller({
+        jobId: job.id,
+        onUpdate: (updated) => {
+          jobView.render(updated);
+
+          if (updated.status === "completed") {
+            notifications.success(
+              `Long text finished: ${updated.completed} of ${updated.total} items.`,
+            );
+            setBusy(false);
+          } else if (updated.status === "failed") {
+            notifications.error(updated.error || "Long-text generation failed.");
+            setBusy(false);
+          }
+        },
+        onError: (error) => {
+          notifications.error(error.message);
+          setBusy(false);
+        },
+      });
+
+      poller.start();
+    } catch (error) {
+      notifications.error(
+        error instanceof ApiError ? error.message : "Could not start the job.",
+      );
+      setBusy(false);
+    }
+  }
+
+  /**
+   * The single generation entry point. The button and the keyboard shortcuts
+   * both call this; the gate guarantees one request at a time.
+   */
+  async function startGeneration() {
+    if (!gate.tryStart()) {
+      return;
+    }
+
+    const engine = engineSelect.value;
+    const voice = voiceForRequest(engine, voiceSelect.value);
+    const speed = speedForRequest(engine, speedInput.value);
+
+    if (mode === "long") {
+      setBusy(true);
+
+      try {
+        await startLongGeneration(engine, voice, speed);
+      } finally {
+        gate.finish();
+        // Long-text jobs re-enable the UI when the job finishes; the job
+        // view keeps polling in the background.
+        if (!poller) {
+          setBusy(false);
+        }
+      }
+
+      return;
+    }
+
+    const validation = validateText(textarea.value, shortLimit);
+
+    if (!validation.ok) {
+      gate.finish();
+      notifications.error(validation.error);
+      textarea.focus();
+      return;
+    }
+
+    setBusy(true);
+
+    try {
+      await startShortGeneration(engine, voice, speed);
     } finally {
       gate.finish();
       setBusy(false);
@@ -339,13 +509,26 @@ export function createStudioPage({ capabilities, notifications }) {
   }
 
   textarea.addEventListener("input", updateCounter);
-
   speedInput.addEventListener("input", updateSpeedLabel);
 
   textarea.addEventListener("keydown", (event) => {
+    if (mode === "long") {
+      const action = resolveLongTextKey(event, textarea.value);
+
+      if (action === KeyAction.NEWLINE) {
+        return; // Enter inserts a newline
+      }
+
+      if (action === KeyAction.GENERATE) {
+        event.preventDefault();
+        startGeneration();
+      }
+
+      return;
+    }
+
     const action = resolveKeyAction(event, textarea.value);
 
-    // Shift+Enter and IME composition keep the browser's default behaviour.
     if (action === KeyAction.NEWLINE || event.isComposing) {
       return;
     }
@@ -354,16 +537,11 @@ export function createStudioPage({ capabilities, notifications }) {
       return;
     }
 
-    // Do not hijack Ctrl/Cmd/Alt+Enter.
     if (event.ctrlKey || event.metaKey || event.altKey) {
       return;
     }
 
-    // Plain Enter never inserts a newline in the composer.
     event.preventDefault();
-
-    // Even when the text is empty we call the shared entry point: it
-    // validates, explains the problem and stops.
     startGeneration();
   });
 
@@ -376,7 +554,17 @@ export function createStudioPage({ capabilities, notifications }) {
 
   syncVisibility();
   updateSpeedLabel();
-  updateCounter();
+  updateModeUi();
 
-  return { element: grid, startGeneration };
+  return {
+    element: wrapper,
+    startGeneration,
+
+    deactivate() {
+      if (poller) {
+        poller.stop();
+        poller = null;
+      }
+    },
+  };
 }

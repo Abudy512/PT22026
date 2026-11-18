@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from voiceforge.app_core import VoiceForgeApp  # noqa: E402
 from voiceforge.checkpoint import get_model_config  # noqa: E402
+from voiceforge.jobs import JobManager  # noqa: E402
 from voiceforge.model import AcousticModel  # noqa: E402
 from voiceforge.text import CHAR_TO_ID  # noqa: E402
 from voiceforge.web_app import create_server  # noqa: E402
@@ -69,8 +70,10 @@ def app(tmp_path, tiny_checkpoint):
 
 
 @pytest.fixture
-def server(app):
-    httpd = create_server(app, host="127.0.0.1", port=0)
+def server(app, tmp_path):
+    jobs = JobManager(app, job_root=tmp_path / "jobs")
+
+    httpd = create_server(app, host="127.0.0.1", port=0, jobs=jobs)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
 
@@ -82,6 +85,27 @@ def server(app):
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=5)
+
+
+def wait_for_job(url: str, job_id: str, timeout: float = 120.0) -> dict:
+    """Poll ``GET /api/jobs/{id}`` until it reaches a terminal status."""
+
+    import time
+
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        with http_get(f"{url}/api/jobs/{job_id}") as response:
+            payload = json.loads(response.read())
+
+        job = payload["job"]
+
+        if job["status"] in ("completed", "failed"):
+            return job
+
+        time.sleep(0.1)
+
+    raise AssertionError(f"job {job_id} did not finish within {timeout}s")
 
 
 def http_get(url: str):

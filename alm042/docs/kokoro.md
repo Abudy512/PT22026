@@ -91,13 +91,13 @@ tts.save("Hello, this is Kokoro speaking through VoiceForge.", "out.wav")
 
 | Voice | Description |
 |---|---|
-| `af_heart` | American female — warm and clear (default) |
-| `af_bella` | American female — expressive |
-| `af_nicole` | American female — soft |
-| `af_sarah` | American female — neutral |
-| `am_michael` | American male — calm |
-| `am_adam` | American male — deeper |
-| `am_onyx` | American male — low |
+| `af_heart` | US female — warm and clear (default) |
+| `af_bella` | US female — expressive |
+| `af_nicole` | US female — soft |
+| `af_sarah` | US female — neutral |
+| `am_michael` | US male — calm |
+| `am_adam` | US male — deeper |
+| `am_onyx` | US male — low |
 
 Kokoro ships many more voices; the list above is the curated American-English
 subset exposed in the UI.

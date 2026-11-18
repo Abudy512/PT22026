@@ -34,13 +34,13 @@ DEFAULT_VOICE = "af_heart"
 
 #: Curated American-English voices exposed by the interface.
 KOKORO_VOICES: dict[str, str] = {
-    "af_heart": "American female — warm and clear (default)",
-    "af_bella": "American female — expressive",
-    "af_nicole": "American female — soft",
-    "af_sarah": "American female — neutral",
-    "am_michael": "American male — calm",
-    "am_adam": "American male — deeper",
-    "am_onyx": "American male — low",
+    "af_heart": "US female — warm and clear (default)",
+    "af_bella": "US female — expressive",
+    "af_nicole": "US female — soft",
+    "af_sarah": "US female — neutral",
+    "am_michael": "US male — calm",
+    "am_adam": "US male — deeper",
+    "am_onyx": "US male — low",
 }
 
 
@@ -112,6 +112,39 @@ def configure_cache(cache_dir: str | Path = "outputs/hf") -> str | None:
     return str(target)
 
 
+def use_cached_weights_offline(repo_id: str = KOKORO_REPO_ID) -> bool:
+    """
+    Use the cached weights without contacting Hugging Face.
+
+    When the model is already in the local cache, `huggingface_hub` still
+    re-validates file metadata over the network on some calls. On a machine
+    where huggingface.co is unreachable that stalls model loading for
+    minutes, so offline mode is enabled whenever the snapshot is present.
+
+    Returns True when offline mode was enabled. Must run before importing
+    ``kokoro``/``huggingface_hub``.
+    """
+
+    hub_cache = os.environ.get("HF_HUB_CACHE")
+
+    if not hub_cache:
+        hf_home = os.environ.get("HF_HOME")
+        hub_cache = str((Path(hf_home) if hf_home else _default_cache_dir()) / "hub")
+
+    folder = Path(hub_cache) / ("models--" + repo_id.replace("/", "--"))
+
+    if not folder.is_dir():
+        return False
+
+    snapshots = folder / "snapshots"
+
+    if not snapshots.is_dir() or not any(snapshots.iterdir()):
+        return False
+
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    return True
+
+
 class KokoroBackend:
     """
     Thin wrapper around :class:`kokoro.KPipeline`.
@@ -176,6 +209,7 @@ class KokoroBackend:
 
         # Must run before kokoro imports huggingface_hub.
         self._cache_dir = configure_cache()
+        self._offline = use_cached_weights_offline(self.repo_id)
 
         try:
             from kokoro import KPipeline

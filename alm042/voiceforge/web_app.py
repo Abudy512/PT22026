@@ -1,15 +1,14 @@
 """
 Dependency-free web interface for VoiceForge.
 
-The interface is a single HTML page served by Python's standard-library HTTP
-server.  It needs no extra packages, which matters for a university project
-that must run on any machine with the project requirements installed, and it
-means the application can be fully tested here.
+The user interface is a separate static application in ``frontend/`` (HTML,
+CSS and ES modules).  This module only serves those files and the JSON API:
 
-Two endpoints do the work:
-
-* ``POST /generate``  JSON ``{"text": "..."}`` -> generated WAV metadata
-* ``GET  /audio/<file>`` -> the WAV itself (used for playback and download)
+* ``GET  /``                 the application shell (``frontend/index.html``)
+* ``GET  /css/...``, ``/js/...``, ``/assets/...``  static assets
+* ``GET  /health``           engine capabilities and limits
+* ``GET  /audio/<file>``     a generated WAV (playback and download)
+* ``POST /generate``         JSON ``{"text": ...}`` -> generated WAV metadata
 """
 
 from __future__ import annotations
@@ -19,10 +18,36 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
-from voiceforge.app_core import AppError, VoiceForgeApp
+from voiceforge.app_core import (
+    ENGINE_LABELS,
+    MAX_TEXT_LENGTH,
+    AppError,
+    VoiceForgeApp,
+)
 
-TEMPLATE_PATH = Path(__file__).parent / "templates" / "index.html"
+#: Static frontend root (``alm042/frontend``).
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
+#: URL prefixes that may be served from :data:`FRONTEND_DIR`.
+STATIC_PREFIXES = ("css/", "js/", "assets/")
+
+#: Only these extensions are served, with an explicit content type.
+STATIC_MIME_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
+}
 
 #: Refuse request bodies larger than this (text is limited to 400 chars).
 MAX_BODY_BYTES = 64 * 1024
@@ -107,10 +132,14 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
     # GET
     # ------------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802 (standard library naming)
-        path = self.path.split("?", 1)[0]
+        # Unquote so that encoded traversal attempts are inspected as paths.
+        path = unquote(self.path.split("?", 1)[0])
 
         if path in ("/", "/index.html"):
-            self._send_index()
+            self._send_file(
+                FRONTEND_DIR / "index.html",
+                "text/html; charset=utf-8",
+            )
             return
 
         if path == "/health":
@@ -120,6 +149,7 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "model_loaded": self.app.is_loaded,
                     "checkpoint": str(self.app.checkpoint_path),
+                    "limits": {"max_text_length": MAX_TEXT_LENGTH},
                     "engines": self.app.describe_engines(),
                 },
             )
@@ -129,16 +159,54 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
             self._send_audio(path[len("/audio/"):])
             return
 
-        self._send_error_json(404, "Page not found.")
+        relative = path.lstrip("/")
 
-    def _send_index(self) -> None:
-        try:
-            html = TEMPLATE_PATH.read_text(encoding="utf-8")
-        except OSError:
-            self._send_error_json(500, "The interface template is missing.")
+        if relative.startswith(STATIC_PREFIXES):
+            self._send_static(relative)
             return
 
-        self._send_bytes(200, html.encode("utf-8"), "text/html; charset=utf-8")
+        self._send_error_json(404, "Page not found.")
+
+    def _send_file(self, path: Path, content_type: str) -> None:
+        """Send one file from the frontend directory."""
+
+        try:
+            data = path.read_bytes()
+        except OSError:
+            self._send_error_json(404, "Page not found.")
+            return
+
+        self._send_bytes(200, data, content_type)
+
+    def _send_static(self, relative: str) -> None:
+        """
+        Serve a CSS/JS/asset file, refusing anything outside ``frontend/``.
+
+        Traversal is blocked three ways: explicit ``..`` segments, a resolved
+        path that must stay inside the frontend root, and an allow-list of
+        extensions (so a stray .py or .pt file can never be served).
+        """
+
+        parts = Path(relative).parts
+
+        if ".." in parts or relative.startswith("/") or ":" in parts[0]:
+            self._send_error_json(404, "Page not found.")
+            return
+
+        root = FRONTEND_DIR.resolve()
+        candidate = (root / relative).resolve()
+
+        if root not in candidate.parents or not candidate.is_file():
+            self._send_error_json(404, "Page not found.")
+            return
+
+        content_type = STATIC_MIME_TYPES.get(candidate.suffix.lower())
+
+        if content_type is None:
+            self._send_error_json(404, "Page not found.")
+            return
+
+        self._send_file(candidate, content_type)
 
     def _send_audio(self, filename: str) -> None:
         try:

@@ -41,8 +41,8 @@ ENGINE_AUTO = "auto"
 SUPPORTED_ENGINES = (ENGINE_KOKORO, ENGINE_VOICEFORGE)
 
 ENGINE_LABELS = {
-    ENGINE_KOKORO: "Kokoro-82M (pretrained, natural speech)",
-    ENGINE_VOICEFORGE: "VoiceForge custom model (student-built, experimental)",
+    ENGINE_KOKORO: "Kokoro-82M — natural speech",
+    ENGINE_VOICEFORGE: "VoiceForge custom — experimental",
 }
 
 
@@ -207,10 +207,12 @@ class VoiceForgeApp:
         return {
             "default": self.resolve_engine(),
             "requested": self.requested_engine,
+            "labels": dict(ENGINE_LABELS),
             "kokoro": {
                 "installed": kokoro_is_installed(),
                 "loaded": self._kokoro is not None,
                 "voices": list(KOKORO_VOICES),
+                "voice_labels": dict(KOKORO_VOICES),
                 "sample_rate": KokoroBackend.SAMPLE_RATE,
             },
             "voiceforge": {

@@ -30,7 +30,7 @@ VoiceForge is a university project with **two speech engines**:
 | Main engine | Kokoro-82M (pretrained, Apache-2.0) |
 | Custom model | Tacotron-lite, 2,997,410 parameters |
 | Dataset (custom model) | LJSpeech 1.1 (13,100 clips, single speaker, 22,050 Hz) |
-| Tests | pytest suite removed from this snapshot (recoverable from Git history) |
+| Tests | 50 automated tests (26 Python + 24 JavaScript) |
 
 ---
 
@@ -155,6 +155,19 @@ alm042/
 │   ├── api.md                    # Python API reference
 │   ├── architecture.md           # Model and training design
 │   └── evaluation.md             # Metrics, results and interpretation
+├── frontend/                     # Static UI: HTML + CSS + ES modules
+│   ├── index.html                # Application shell
+│   ├── css/                      # style.css, layout.css, components.css
+│   ├── js/
+│   │   ├── app.js                # Bootstrap, navigation, routing
+│   │   ├── api.js                # All HTTP calls
+│   │   ├── state.js              # Store + generation gate
+│   │   ├── validation.js         # Text rules
+│   │   ├── keyboard.js           # Enter / Shift+Enter logic
+│   │   ├── engine-ui.js          # Engine/voice UI rules
+│   │   ├── components/           # notifications.js, audio-player.js
+│   │   └── pages/                # studio.js, coming-soon.js
+│   └── tests/                    # Node unit tests (node --test)
 ├── outputs/                      # Generated audio (git-ignored)
 ├── scripts/
 │   ├── check_audio.py            # Detect NaN, silence, clipping, buzz
@@ -162,7 +175,7 @@ alm042/
 │   ├── evaluate.py               # Objective model evaluation
 │   ├── generate.py               # Command-line speech generation
 │   └── train.py                  # Training entry point
-├── tests/                        # (removed at the author's request; in Git history)
+├── tests/                        # Python API and static-serving tests
 └── voiceforge/
     ├── __init__.py               # Public API
     ├── app_core.py               # Application logic (shared by UIs)
@@ -177,8 +190,7 @@ alm042/
     ├── text.py                   # Normalisation and vocabulary
     ├── training.py               # Training loop and losses
     ├── tts.py                    # VoiceForgeTTS inference pipeline
-    ├── web_app.py                # HTTP interface
-    └── templates/index.html      # Web UI
+    └── web_app.py                # HTTP server: API + static assets
 ```
 
 ## 5. Installation
@@ -449,18 +461,34 @@ Summary of the measured comparison (identical 64 held-out samples):
 
 ## 12. Testing
 
-The automated pytest suite (18 files, 198 passing tests) was **removed from
-the working tree at the author's request** and is no longer part of this
-repository snapshot. It remains available in the Git history if it is needed
-again:
+```bash
+# Python: API, validation, static serving, path-traversal protection
+python -m pytest tests -q
+
+# JavaScript: keyboard rules, validation, state gate, engine UI rules
+node --test frontend/tests
+```
+
+```
+26 passed, 3 skipped        # Python (the 3 skipped are optional real-Kokoro tests)
+24 passed                   # JavaScript
+```
+
+The optional Kokoro API tests load the real 82M model, so they are gated:
+
+```bash
+set VOICEFORGE_TEST_KOKORO=1
+python -m pytest tests/test_kokoro_api.py -q
+```
+
+An earlier, larger pytest suite (18 files, 198 tests) was removed from the
+working tree at the author's request and remains recoverable from Git:
 
 ```bash
 git checkout 84ba9f6 -- tests
-python -m pytest tests -q
 ```
 
-Verification of the current code is done through the application and the
-command-line tools:
+Manual checks:
 
 ```bash
 python app.py --engine kokoro        # generate and listen

@@ -1,0 +1,309 @@
+/**
+ * VoiceForge frontend bootstrap.
+ *
+ * Responsibilities: fetch capabilities from the backend, build the sidebar,
+ * route between pages and keep the engine status indicator in sync.
+ */
+
+import { ApiError, fetchCapabilities } from "./api.js";
+import { createNotifications } from "./components/notifications.js";
+import { createComingSoonPage } from "./pages/coming-soon.js";
+import { createStudioPage } from "./pages/studio.js";
+import { createStore } from "./state.js";
+
+const NAV_ITEMS = [
+  {
+    id: "studio",
+    label: "Speech Studio",
+    icon: "\u25c9",
+    title: "Speech Studio",
+    subtitle: "Turn text into speech with Kokoro or the VoiceForge custom model.",
+    kind: "studio",
+  },
+  {
+    id: "compare",
+    label: "Voice Compare",
+    icon: "\u21c4",
+    title: "Voice Compare",
+    subtitle: "Hear the same sentence across engines and voices.",
+    kind: "soon",
+    description:
+      "Voice Compare will generate one sentence with several engines and voices so you can listen back to back.",
+  },
+  {
+    id: "batch",
+    label: "Batch Studio",
+    icon: "\u25a4",
+    title: "Batch Studio",
+    subtitle: "Generate many sentences in a single run.",
+    kind: "soon",
+    description:
+      "Batch Studio will queue multiple sentences, report progress per item and bundle the results for download.",
+  },
+  {
+    id: "library",
+    label: "Audio Library",
+    icon: "\u266a",
+    title: "Audio Library",
+    subtitle: "Browse and reuse everything you have generated.",
+    kind: "soon",
+    description:
+      "The Audio Library will keep a searchable history of generated speech with its text, engine and settings.",
+  },
+  {
+    id: "tools",
+    label: "Text Tools",
+    icon: "\u270e",
+    title: "Text Tools",
+    subtitle: "Clean and prepare text before synthesis.",
+    kind: "soon",
+    description:
+      "Text Tools will normalise punctuation, expand numbers and split long documents into speakable chunks.",
+  },
+  {
+    id: "settings",
+    label: "Settings",
+    icon: "\u2699",
+    title: "Settings",
+    subtitle: "Engine defaults, cache and application preferences.",
+    kind: "soon",
+    description:
+      "Settings will expose the default engine and voice, the Hugging Face cache location and other preferences.",
+  },
+];
+
+const dom = {
+  nav: document.getElementById("nav"),
+  pageRoot: document.getElementById("page-root"),
+  pageTitle: document.getElementById("page-title"),
+  pageSubtitle: document.getElementById("page-subtitle"),
+  badges: document.getElementById("topbar-badges"),
+  statusDot: document.getElementById("engine-status-dot"),
+  statusText: document.getElementById("engine-status-text"),
+  sidebar: document.getElementById("sidebar"),
+  navToggle: document.getElementById("nav-toggle"),
+  toastStack: document.getElementById("toast-stack"),
+};
+
+const notifications = createNotifications(dom.toastStack);
+const store = createStore({ capabilities: null, page: "studio", error: null });
+
+let studioPage = null;
+let studioHost = null;
+
+function currentItem() {
+  const { page } = store.get();
+  return NAV_ITEMS.find((item) => item.id === page) || NAV_ITEMS[0];
+}
+
+function buildNav() {
+  dom.nav.replaceChildren();
+
+  for (const item of NAV_ITEMS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "nav-item";
+    button.dataset.page = item.id;
+    button.setAttribute("aria-current", "false");
+
+    const icon = document.createElement("span");
+    icon.className = "nav-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = item.icon;
+
+    const label = document.createElement("span");
+    label.className = "nav-label";
+    label.textContent = item.label;
+
+    button.append(icon, label);
+
+    if (item.kind === "soon") {
+      const tag = document.createElement("span");
+      tag.className = "nav-tag";
+      tag.textContent = "Soon";
+      button.append(tag);
+    }
+
+    button.addEventListener("click", () => {
+      store.set({ page: item.id });
+      dom.sidebar.classList.remove("is-open");
+      dom.navToggle.setAttribute("aria-expanded", "false");
+    });
+
+    dom.nav.append(button);
+  }
+}
+
+function markActiveNav() {
+  const { page } = store.get();
+
+  for (const button of dom.nav.querySelectorAll(".nav-item")) {
+    const active = button.dataset.page === page;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-current", active ? "page" : "false");
+  }
+}
+
+function renderStatus() {
+  const { capabilities, error } = store.get();
+
+  if (capabilities) {
+    const engineCount = Object.keys(capabilities.engines?.labels || {}).length;
+    const defaultId = capabilities.engines?.default;
+    const defaultLabel =
+      capabilities.engines?.labels?.[defaultId] || defaultId || "engine";
+
+    dom.statusDot.className = "status-dot is-ready";
+    dom.statusText.textContent = `${engineCount} engines \u00b7 ${defaultLabel.split(" —")[0]} default`;
+    return;
+  }
+
+  dom.statusDot.className = error ? "status-dot is-down" : "status-dot";
+  dom.statusText.textContent = error ? "Backend unavailable" : "Checking engines\u2026";
+}
+
+function renderBadges() {
+  const { capabilities } = store.get();
+  dom.badges.replaceChildren();
+
+  if (!capabilities) {
+    return;
+  }
+
+  const defaultId = capabilities.engines?.default;
+  const maxLength = capabilities.limits?.max_text_length;
+
+  if (defaultId) {
+    const engineBadge = document.createElement("span");
+    engineBadge.className = "badge badge-accent";
+    engineBadge.textContent =
+      capabilities.engines?.labels?.[defaultId]?.split(" —")[0] || defaultId;
+    dom.badges.append(engineBadge);
+  }
+
+  if (maxLength) {
+    const limitBadge = document.createElement("span");
+    limitBadge.className = "badge";
+    limitBadge.textContent = `${maxLength} character limit`;
+    dom.badges.append(limitBadge);
+  }
+}
+
+function renderErrorState(error) {
+  const panel = document.createElement("div");
+  panel.className = "coming-soon";
+
+  const badge = document.createElement("span");
+  badge.className = "badge";
+  badge.textContent = "Connection problem";
+
+  const heading = document.createElement("h2");
+  heading.textContent = "The VoiceForge backend did not respond";
+
+  const message = document.createElement("p");
+  message.textContent = error?.message || "Unknown error.";
+
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "button button-ghost";
+  retry.textContent = "Retry";
+  retry.addEventListener("click", () => boot());
+
+  const hint = document.createElement("p");
+  hint.className = "meta-key";
+  hint.textContent =
+    "Start the server with: python app.py \u2014 then reload this page.";
+
+  panel.append(badge, heading, message, retry, hint);
+  return panel;
+}
+
+function renderLoadingState() {
+  const panel = document.createElement("div");
+  panel.className = "coming-soon";
+
+  const spinner = document.createElement("span");
+  spinner.className = "spinner";
+
+  const text = document.createElement("p");
+  text.textContent = "Loading engines\u2026";
+
+  panel.append(spinner, text);
+  return panel;
+}
+
+function renderPage() {
+  const item = currentItem();
+
+  dom.pageTitle.textContent = item.title;
+  dom.pageSubtitle.textContent = item.subtitle;
+  markActiveNav();
+
+  const { capabilities, error } = store.get();
+
+  if (item.kind === "studio") {
+    if (!capabilities) {
+      dom.pageRoot.replaceChildren(
+        error ? renderErrorState(error) : renderLoadingState(),
+      );
+      return;
+    }
+
+    if (!studioPage) {
+      studioPage = createStudioPage({ capabilities, notifications });
+      studioHost = document.createElement("div");
+      studioHost.append(studioPage.element);
+    }
+
+    dom.pageRoot.replaceChildren(studioHost);
+    return;
+  }
+
+  const page = createComingSoonPage({
+    title: item.title,
+    description: item.description,
+  });
+
+  dom.pageRoot.replaceChildren(page.element);
+}
+
+async function boot() {
+  store.set({ error: null });
+  renderPage();
+
+  try {
+    const capabilities = await fetchCapabilities();
+    store.set({ capabilities });
+  } catch (error) {
+    const message =
+      error instanceof ApiError
+        ? error.message
+        : "Could not load engine information.";
+
+    store.set({ capabilities: null, error: new Error(message) });
+    notifications.error(message);
+  }
+}
+
+// --- wiring ---------------------------------------------------------------
+buildNav();
+
+store.subscribe(() => {
+  renderStatus();
+  renderBadges();
+  renderPage();
+});
+
+dom.navToggle.addEventListener("click", () => {
+  const open = dom.sidebar.classList.toggle("is-open");
+  dom.navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    dom.sidebar.classList.remove("is-open");
+    dom.navToggle.setAttribute("aria-expanded", "false");
+  }
+});
+
+boot();

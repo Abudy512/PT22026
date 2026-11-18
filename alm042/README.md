@@ -173,6 +173,8 @@ alm042/
 ├── app.py                        # Launch the web application
 ├── app_gradio.py                 # Optional Gradio front-end (needs gradio)
 ├── requirements.txt
+├── README.md
+├── PROJECT_SUMMARY.md            # Technical summary for report writing
 ├── checkpoints/                  # Model weights (git-ignored)
 ├── data/                         # LJSpeech dataset (git-ignored)
 ├── docs/
@@ -202,7 +204,7 @@ alm042/
 │   ├── evaluate.py               # Objective model evaluation
 │   ├── generate.py               # Command-line speech generation
 │   └── train.py                  # Training entry point
-├── tests/                        # Python API and static-serving tests
+├── tests/                        # Python tests (200), shared conftest
 └── voiceforge/
     ├── __init__.py               # Public API
     ├── app_core.py               # Application logic (shared by UIs)
@@ -859,6 +861,7 @@ python app.py
 
 ## 18. University delivery
 
+- **Technical summary for report writing:** [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)
 - **Report outline and verified fact sheet:** [docs/report-outline.md](docs/report-outline.md)
 - **3–5 minute demonstration script:** [docs/demo-plan.md](docs/demo-plan.md)
 - **Kokoro integration notes:** [docs/kokoro.md](docs/kokoro.md)

@@ -34,3 +34,20 @@ logs/
 
 # Generated audio and application output
 outputs/
+
+# Runtime databases and generated audio outside outputs/ (defensive)
+*.db
+*.sqlite
+*.sqlite3
+*.wav
+*.mp3
+
+# Temporary files and OS/editor noise
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+.env
+
+# Node.js (frontend tests need none of these)
+node_modules/

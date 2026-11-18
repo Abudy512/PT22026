@@ -8,6 +8,7 @@
 import { ApiError, fetchEngineInfo } from "./api.js";
 import { createNotifications } from "./components/notifications.js";
 import { createBatchPage } from "./pages/batch.js";
+import { createLibraryPage } from "./pages/library.js";
 import { createComingSoonPage } from "./pages/coming-soon.js";
 import { createStudioPage } from "./pages/studio.js";
 import { createStore } from "./state.js";
@@ -45,9 +46,7 @@ const NAV_ITEMS = [
     icon: "\u266a",
     title: "Audio Library",
     subtitle: "Browse and reuse everything you have generated.",
-    kind: "soon",
-    description:
-      "The Audio Library will keep a searchable history of generated speech with its text, engine and settings.",
+    kind: "library",
   },
   {
     id: "tools",
@@ -91,6 +90,8 @@ let studioPage = null;
 let studioHost = null;
 let batchPage = null;
 let batchHost = null;
+let libraryPage = null;
+let libraryHost = null;
 let activePage = null;
 
 function mountPage(page) {
@@ -281,6 +282,25 @@ function renderPage() {
 
     mountPage(batchPage);
     dom.pageRoot.replaceChildren(batchHost);
+    return;
+  }
+
+  if (item.kind === "library") {
+    if (!capabilities) {
+      dom.pageRoot.replaceChildren(
+        error ? renderErrorState(error) : renderLoadingState(),
+      );
+      return;
+    }
+
+    if (!libraryPage) {
+      libraryPage = createLibraryPage({ capabilities, notifications });
+      libraryHost = document.createElement("div");
+      libraryHost.append(libraryPage.element);
+    }
+
+    mountPage(libraryPage);
+    dom.pageRoot.replaceChildren(libraryHost);
     return;
   }
 

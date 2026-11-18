@@ -30,7 +30,7 @@ VoiceForge is a university project with **two speech engines**:
 | Main engine | Kokoro-82M (pretrained, Apache-2.0) |
 | Custom model | Tacotron-lite, 2,997,410 parameters |
 | Dataset (custom model) | LJSpeech 1.1 (13,100 clips, single speaker, 22,050 Hz) |
-| Tests | 167 automated tests (105 Python + 62 JavaScript), plus 9 optional real-Kokoro tests |
+| Tests | 223 automated tests (142 Python + 81 JavaScript), plus 12 optional real-Kokoro tests |
 
 ---
 
@@ -95,6 +95,8 @@ VoiceForge solves this with its own attention-based acoustic model:
 - **Seven Kokoro voices** — American English female and male voices.
 - **Speech speed control** — 0.5× to 2.0× for Kokoro, applied per request
   without reloading the model.
+- **Persistent Audio Library** — every generated WAV is recorded in SQLite
+  with its text, engine, voice, speed and duration, and survives restarts.
 - **Command line generation** — `python -m scripts.generate`.
 - **Interactive web application** — engine and voice selectors, text input,
   playback, WAV download, validation messages and a loading indicator.
@@ -438,6 +440,11 @@ Everything runs locally; no text or audio leaves the machine.
 | GET | `/api/jobs/{id}/audio/{item}` | — | One completed item (WAV) |
 | GET | `/api/jobs/{id}/download` | — | ZIP with all completed audio + manifest |
 | POST | `/api/uploads` | `{files: [{name, data_base64}]}` | Validate and decode `.txt` uploads |
+| GET | `/api/library` | — | List/search/sort/filter recordings |
+| GET | `/api/library/{id}` | — | One recording |
+| PATCH | `/api/library/{id}` | `{name}` | Rename a recording |
+| DELETE | `/api/library/{id}` | — | Delete the record and its WAV |
+| GET | `/api/library/{id}/audio` | `?download=1` optional | Playback or download |
 
 ### Long text, batches and uploads
 
@@ -548,8 +555,8 @@ node --test frontend/tests
 ```
 
 ```
-105 passed, 9 skipped       # Python (the 9 skipped are optional real-Kokoro tests)
-62 passed                   # JavaScript
+142 passed, 12 skipped      # Python (the 12 skipped are optional real-Kokoro tests)
+81 passed                   # JavaScript
 ```
 
 The optional Kokoro API tests load the real 82M model, so they are gated:
@@ -575,7 +582,58 @@ python -m scripts.generate "Hello." --output outputs/hello.wav
 python -m scripts.check_audio --checkpoint checkpoints/voiceforge_attn.pt
 ```
 
+
+### Audio Library
+
+Every successful generation — Speech Studio, Long Text, each Batch item — is
+copied into `outputs/library/` and recorded in `outputs/library.db`
+(SQLite). Both are local application data and are ignored by Git.
+
+| Query parameter | Meaning |
+|---|---|
+| `q` | Search in display name and original text (max 200 chars) |
+| `sort` | `newest` (default), `oldest`, `name`, `duration` |
+| `engine` | `kokoro` or `voiceforge` |
+| `source` | `studio`, `long_text`, `batch` |
+| `page`, `limit` | Pagination; `limit` is capped at 100 |
+
+```json
+GET /api/library?q=welcome&sort=name&source=studio&page=1&limit=10
+{
+  "ok": true,
+  "records": [{"id": "4497b644…", "name": "Welcome", "engine": "kokoro",
+               "voice": "af_heart", "speed": 1.0, "sample_rate": 24000,
+               "duration_seconds": 2.8, "file_size": 134444,
+               "source_type": "studio", "created_at": "2026-11-18T14:49:00+00:00",
+               "original_text": "Welcome to VoiceForge."}],
+  "pagination": {"page": 1, "limit": 10, "total": 1, "pages": 1}
+}
+```
+
+- **Rename** changes only the display name (`PATCH`); the WAV filename never
+  changes. Names are trimmed, limited to 80 characters and must be non-empty.
+- **Delete** removes the database row and the library WAV. It refuses names
+  outside the library folder, tolerates an already-missing file, and rolls
+  the transaction back if the file cannot be removed.
+- **Missing audio**: a record whose file disappeared still appears in the
+  list; its audio endpoint returns a clear `404 audio_not_found` instead of
+  breaking the page.
+- **Persistence**: records live in SQLite, so they remain after a restart
+  even though background job status is still in memory.
+
 ## 13. Known limitations
+
+### Audio Library
+
+1. **Single-user local database.** No accounts, no locking beyond SQLite's
+   own; it is designed for one machine.
+2. **No bulk delete or bulk export** in this phase.
+3. **Jobs stay in memory** — their status and ZIP links disappear after a
+   restart, although the library records and WAVs remain.
+4. **Deleting a library record does not delete the job ZIP**, which still
+   contains its own copy of the audio.
+5. **Search is `LIKE`-based**, fine for thousands of rows but not a
+   full-text index.
 
 ### Jobs and batch processing
 

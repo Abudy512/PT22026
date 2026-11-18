@@ -19,7 +19,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlparse
 
 from voiceforge.app_core import (
     ENGINE_LABELS,
@@ -32,6 +32,10 @@ from voiceforge.jobs import (
     JobManager,
     JobNotFound,
     JobQueueFull,
+)
+from voiceforge.library import (
+    DEFAULT_PAGE_SIZE,
+    Library,
 )
 from voiceforge.uploads import validate_uploads
 
@@ -71,10 +75,16 @@ class VoiceForgeServer(ThreadingHTTPServer):
         server_address: tuple[str, int],
         app: VoiceForgeApp,
         jobs: JobManager | None = None,
+        library: Library | None = None,
     ):
         super().__init__(server_address, VoiceForgeHandler)
         self.app = app
-        self.jobs = jobs if jobs is not None else JobManager(app)
+        self.library = library if library is not None else Library()
+        self.jobs = (
+            jobs
+            if jobs is not None
+            else JobManager(app, library=self.library)
+        )
 
     def server_close(self) -> None:
         try:
@@ -231,6 +241,10 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/jobs/"):
             self._handle_job_get(path[len("/api/jobs/"):])
+            return
+
+        if path == "/api/library" or path.startswith("/api/library/"):
+            self._handle_library_get(path)
             return
 
         if path.startswith("/audio/"):
@@ -448,6 +462,8 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
             self._send_app_error(error)
             return
 
+        self._record_studio_audio(result)
+
         self._send_json(
             200,
             {
@@ -465,6 +481,197 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def do_PATCH(self) -> None:  # noqa: N802 (standard library naming)
+        try:
+            self._handle_patch()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception:  # noqa: BLE001 - never leak a traceback
+            self._log_internal_error()
+            self._send_internal_error()
+
+    def do_DELETE(self) -> None:  # noqa: N802 (standard library naming)
+        try:
+            self._handle_delete()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception:  # noqa: BLE001 - never leak a traceback
+            self._log_internal_error()
+            self._send_internal_error()
+
+    # ------------------------------------------------------------------
+    # Audio library
+    # ------------------------------------------------------------------
+    def _record_studio_audio(self, result: Any) -> None:
+        """Record a successful Speech Studio generation (best effort)."""
+
+        try:
+            self.server.library.record(  # type: ignore[attr-defined]
+                text=result.text,
+                source_filename=result.filename,
+                source_path=result.path,
+                engine=result.engine,
+                voice=result.voice,
+                speed=result.speed,
+                sample_rate=result.sample_rate,
+                duration_seconds=result.duration_seconds,
+                source_type="studio",
+            )
+        except Exception as error:  # noqa: BLE001 - never fail the request
+            print(f"[web] could not add audio to the library: {error}", flush=True)
+
+    def _handle_library_get(self, path: str) -> None:
+        if path == "/api/library":
+            self._handle_library_list()
+            return
+
+        parts = [part for part in path[len("/api/library/"):].split("/") if part]
+
+        if not parts:
+            self._send_error_json(404, "Page not found.", "not_found")
+            return
+
+        record_id = parts[0]
+
+        if len(parts) == 2 and parts[1] == "audio":
+            self._handle_library_audio(record_id)
+            return
+
+        if len(parts) == 1:
+            try:
+                record = self.server.library.get(record_id)  # type: ignore[attr-defined]
+            except AppError as error:
+                self._send_app_error(error)
+                return
+
+            self._send_json(200, {"ok": True, "record": record})
+            return
+
+        self._send_error_json(404, "Page not found.", "not_found")
+
+    def _handle_library_list(self) -> None:
+        query = parse_qs(urlparse(self.path).query)
+
+        def first(name: str, default: str | None = None) -> str | None:
+            values = query.get(name)
+            return values[0] if values else default
+
+        text = (first("q") or "").strip() or None
+        sort = first("sort") or "newest"
+        engine = first("engine") or None
+        source = first("source") or None
+
+        try:
+            page = int(first("page") or "1")
+            limit = int(first("limit") or str(DEFAULT_PAGE_SIZE))
+        except ValueError:
+            self._send_error_json(
+                400,
+                "page and limit must be integers.",
+                "invalid_parameter",
+            )
+            return
+
+        page = max(1, page)
+        limit = min(max(1, limit), 100)
+
+        try:
+            records, total = self.server.library.list_records(  # type: ignore[attr-defined]
+                query=text,
+                sort=sort,
+                engine=engine,
+                source=source,
+                page=page,
+                limit=limit,
+            )
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        pages = (total + limit - 1) // limit if total else 0
+
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "records": records,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total,
+                    "pages": pages,
+                },
+            },
+        )
+
+    def _handle_library_audio(self, record_id: str) -> None:
+        try:
+            record, path = self.server.library.audio_path(record_id)  # type: ignore[attr-defined]
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        query = parse_qs(urlparse(self.path).query)
+        download = (query.get("download") or ["0"])[0] in ("1", "true")
+        disposition = "attachment" if download else "inline"
+
+        self._send_bytes(
+            200,
+            path.read_bytes(),
+            "audio/wav",
+            {
+                "Content-Disposition": (
+                    f'{disposition}; filename="{record["filename"]}"'
+                )
+            },
+        )
+
+    def _library_target(self) -> str | None:
+        """Extract a record id from ``/api/library/<id>``."""
+
+        path = self.path.split("?", 1)[0]
+
+        if not path.startswith("/api/library/"):
+            return None
+
+        parts = [part for part in path[len("/api/library/"):].split("/") if part]
+
+        return parts[0] if len(parts) == 1 else ""
+
+    def _handle_patch(self) -> None:
+        record_id = self._library_target()
+
+        if not record_id:
+            self._send_error_json(404, "Page not found.", "not_found")
+            return
+
+        try:
+            payload = self._read_json_body()
+            record = self.server.library.rename(  # type: ignore[attr-defined]
+                record_id,
+                payload.get("name"),
+            )
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        self._send_json(200, {"ok": True, "record": record})
+
+    def _handle_delete(self) -> None:
+        record_id = self._library_target()
+
+        if not record_id:
+            self._send_error_json(404, "Page not found.", "not_found")
+            return
+
+        try:
+            deleted = self.server.library.delete(record_id)  # type: ignore[attr-defined]
+        except AppError as error:
+            self._send_app_error(error)
+            return
+
+        self._send_json(200, {"ok": True, "deleted": deleted})
+
     # Keep the console readable: one short line per request.
     def log_message(self, format: str, *args: Any) -> None:
         print(f"[web] {self.address_string()} {format % args}", flush=True)
@@ -475,10 +682,11 @@ def create_server(
     host: str = "127.0.0.1",
     port: int = 7860,
     jobs: JobManager | None = None,
+    library: Library | None = None,
 ) -> VoiceForgeServer:
     """Create (but do not start) the VoiceForge HTTP server."""
 
-    return VoiceForgeServer((host, port), app, jobs=jobs)
+    return VoiceForgeServer((host, port), app, jobs=jobs, library=library)
 
 
 def run(

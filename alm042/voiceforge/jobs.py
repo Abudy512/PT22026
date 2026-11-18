@@ -163,8 +163,11 @@ class JobManager:
         max_jobs: int = MAX_JOBS,
         max_items: int = MAX_ITEMS,
         gap_seconds: float = DEFAULT_GAP_SECONDS,
+        library: object | None = None,
     ):
         self._app = app
+        # Optional persistent library; jobs stay usable without it.
+        self.library = library
         self.job_root = Path(job_root)
         self.max_jobs = max(1, int(max_jobs))
         self.max_items = max(1, int(max_items))
@@ -356,17 +359,18 @@ class JobManager:
                 )
 
             raw_name = entry.get("name")
+            # The name is a display label, not a path: keep it readable.
+            # Archive entry names are sanitised separately in archive().
             name = (
-                sanitize_filename(raw_name, fallback=f"item_{index + 1}")
-                .removesuffix(".txt")
-                .strip()
-                or f"Item {index + 1}"
+                str(raw_name).strip()[:80]
+                if isinstance(raw_name, str) and raw_name.strip()
+                else f"Item {index + 1}"
             )
 
             job_items.append(
                 JobItem(
                     id=uuid.uuid4().hex[:8],
-                    name=name[:80],
+                    name=name,
                     text=text,
                 )
             )
@@ -457,6 +461,10 @@ class JobManager:
 
                 with self._lock:
                     item.filename = metadata["filename"]
+
+                self._record_in_library(job, item, target, metadata)
+
+                with self._lock:
                     item.status = STATUS_COMPLETED
                     item.error = None
 
@@ -492,6 +500,43 @@ class JobManager:
                 job.error = "All items failed."
             elif job.failed_count:
                 job.error = f"{job.failed_count} of {len(job.items)} items failed."
+
+    def _record_in_library(
+        self,
+        job: Job,
+        item: JobItem,
+        path: Path,
+        metadata: dict,
+    ) -> None:
+        """
+        Add a finished item to the persistent library.
+
+        Recording is idempotent per job item, so polling cannot create
+        duplicates, and a library failure must not fail the audio itself.
+        """
+
+        if self.library is None:
+            return
+
+        try:
+            self.library.record(  # type: ignore[attr-defined]
+                text=item.text,
+                source_filename=item.filename or f"{job.id}-{item.id}.wav",
+                source_path=path,
+                engine=job.engine,
+                voice=job.voice,
+                speed=job.speed,
+                sample_rate=metadata["sample_rate"],
+                duration_seconds=metadata["duration_seconds"],
+                source_type=(
+                    "long_text" if job.type == "long_text" else "batch"
+                ),
+                job_id=job.id,
+                job_item_id=item.id,
+                name=item.name,
+            )
+        except Exception as error:  # noqa: BLE001 - audio already exists
+            print(f"[jobs] could not record audio: {error}", flush=True)
 
     # ------------------------------------------------------------------
     # Archive

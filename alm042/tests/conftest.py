@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from voiceforge.app_core import VoiceForgeApp  # noqa: E402
 from voiceforge.checkpoint import get_model_config  # noqa: E402
 from voiceforge.jobs import JobManager  # noqa: E402
+from voiceforge.library import Library  # noqa: E402
 from voiceforge.model import AcousticModel  # noqa: E402
 from voiceforge.text import CHAR_TO_ID  # noqa: E402
 from voiceforge.web_app import create_server  # noqa: E402
@@ -71,9 +72,19 @@ def app(tmp_path, tiny_checkpoint):
 
 @pytest.fixture
 def server(app, tmp_path):
-    jobs = JobManager(app, job_root=tmp_path / "jobs")
+    library = Library(
+        db_path=tmp_path / "library.db",
+        audio_dir=tmp_path / "library",
+    )
+    jobs = JobManager(app, job_root=tmp_path / "jobs", library=library)
 
-    httpd = create_server(app, host="127.0.0.1", port=0, jobs=jobs)
+    httpd = create_server(
+        app,
+        host="127.0.0.1",
+        port=0,
+        jobs=jobs,
+        library=library,
+    )
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
 
@@ -86,6 +97,22 @@ def server(app, tmp_path):
         httpd.server_close()
         thread.join(timeout=5)
 
+
+
+@pytest.fixture
+def wav_file(tmp_path):
+    """A small valid WAV for library tests."""
+
+    import numpy as np
+    import soundfile as sf
+
+    path = tmp_path / "source.wav"
+    sample_rate = 22050
+    time = np.arange(sample_rate) / sample_rate
+    data = (0.2 * np.sin(2 * np.pi * 220 * time)).astype("float32")
+    sf.write(str(path), data, sample_rate, subtype="PCM_16")
+
+    return path
 
 def wait_for_job(url: str, job_id: str, timeout: float = 120.0) -> dict:
     """Poll ``GET /api/jobs/{id}`` until it reaches a terminal status."""

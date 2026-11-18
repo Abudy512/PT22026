@@ -187,3 +187,75 @@ def test_kokoro_batch_job_with_two_entries(server):
     for item in job["items"]:
         with http_get(server + item["download_url"]) as response:
             assert response.read()[:4] == b"RIFF"
+
+
+def test_kokoro_studio_generation_is_saved_to_the_library(server):
+    with http_post_json(
+        server + "/api/generate",
+        {"text": "Saved in the library.", "engine": "kokoro", "speed": 1.25},
+    ) as response:
+        result = json.loads(response.read())
+
+    with http_get(server + "/api/library?source=studio") as response:
+        payload = json.loads(response.read())
+
+    assert payload["pagination"]["total"] == 1
+    record = payload["records"][0]
+    assert record["engine"] == "kokoro"
+    assert record["speed"] == 1.25
+    assert record["original_text"] == result["text"]
+    assert record["file_size"] > 0
+
+    with http_get(f"{server}/api/library/{record['id']}/audio") as response:
+        assert response.read()[:4] == b"RIFF"
+
+
+def test_kokoro_long_text_job_creates_one_library_record(server):
+    text = " ".join(["A sentence for the library test."] * 14)
+
+    with http_post_json(
+        server + "/api/jobs",
+        {
+            "type": "long_text",
+            "engine": "kokoro",
+            "voice": "af_heart",
+            "items": [{"name": "Library long text", "text": text}],
+        },
+    ) as response:
+        job_id = json.loads(response.read())["job"]["id"]
+
+    wait_for_job(server, job_id, timeout=300)
+
+    with http_get(server + "/api/library?source=long_text") as response:
+        payload = json.loads(response.read())
+
+    assert payload["pagination"]["total"] == 1
+    assert payload["records"][0]["job_id"] == job_id
+    assert payload["records"][0]["name"] == "Library long text"
+
+
+def test_kokoro_batch_records_each_item_in_the_library(server):
+    with http_post_json(
+        server + "/api/jobs",
+        {
+            "type": "batch",
+            "engine": "kokoro",
+            "voice": "am_michael",
+            "items": [
+                {"name": "Batch one", "text": "First library batch entry."},
+                {"name": "Batch two", "text": "Second library batch entry."},
+            ],
+        },
+    ) as response:
+        job_id = json.loads(response.read())["job"]["id"]
+
+    wait_for_job(server, job_id, timeout=300)
+
+    with http_get(server + "/api/library?source=batch") as response:
+        payload = json.loads(response.read())
+
+    assert payload["pagination"]["total"] == 2
+    assert {record["name"] for record in payload["records"]} == {
+        "Batch one",
+        "Batch two",
+    }

@@ -165,7 +165,8 @@ TTS internals; Kokoro is what makes the application useful.
 - **G2P dependency.** `misaki`/`espeak-ng` decide pronunciation; unusual
   proper nouns can still be mispronounced.
 - **Not fine-tuned.** Kokoro's prosody cannot be steered beyond the voice
-  style and a global speed factor.
+  style and the speed factor (0.5×–2.0×, applied per request through
+  `KPipeline.__call__`; the loaded model is reused).
 - **Licence.** Weights are Apache-2.0; retain the model card attribution in
   any redistribution.
 

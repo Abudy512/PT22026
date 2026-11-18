@@ -6,10 +6,11 @@
  */
 
 export class ApiError extends Error {
-  constructor(message, status = 0) {
+  constructor(message, status = 0, code = "request_failed") {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -34,6 +35,7 @@ async function requestJson(url, options = {}) {
     throw new ApiError(
       "Cannot reach the VoiceForge server. Is it still running?",
       0,
+      "network_error",
     );
   }
 
@@ -44,30 +46,38 @@ async function requestJson(url, options = {}) {
       (payload && payload.error) ||
       `The server returned an error (HTTP ${response.status}).`;
 
-    throw new ApiError(message, response.status);
+    throw new ApiError(message, response.status, payload?.code || "request_failed");
   }
 
   return payload;
 }
 
-/** Engine capabilities, voices and text limits. */
-export async function fetchCapabilities() {
-  return requestJson("/health");
+/**
+ * Engine capabilities, voices and limits.
+ * This is the single source of truth for the Studio controls.
+ */
+export async function fetchEngineInfo() {
+  return requestJson("/api/engines");
 }
 
 /**
  * Generate speech.
  *
- * @param {{text: string, engine: string, voice?: string|null, signal?: AbortSignal}} request
+ * @param {{text: string, engine: string, voice?: string|null,
+ *          speed?: number|null, signal?: AbortSignal}} request
  */
-export async function generateSpeech({ text, engine, voice, signal }) {
+export async function generateSpeech({ text, engine, voice, speed, signal }) {
   const body = { text, engine };
 
   if (voice) {
     body.voice = voice;
   }
 
-  return requestJson("/generate", {
+  if (typeof speed === "number") {
+    body.speed = speed;
+  }
+
+  return requestJson("/api/generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

@@ -2,13 +2,18 @@
  * Speech Studio page.
  *
  * Builds the composer, validates input, calls the API and renders the
- * result. All speech logic stays in the Python backend (`app_core.py`).
+ * result. All speech logic stays in the Python backend (`app_core.py`), and
+ * every control (engines, voices, speed range) comes from `/api/engines`.
  */
 
 import { ApiError, generateSpeech } from "../api.js";
 import { createAudioPanel } from "../components/audio-player.js";
 import {
+  describeSpeed,
   describeVoice,
+  formatSpeed,
+  speedControlVisible,
+  speedForRequest,
   voiceControlsVisible,
   voiceForRequest,
 } from "../engine-ui.js";
@@ -40,10 +45,16 @@ function fieldLabel(text, targetId) {
  */
 export function createStudioPage({ capabilities, notifications }) {
   const engines = capabilities.engines || {};
-  const labels = engines.labels || {};
-  const voices = engines.kokoro?.voices || [];
-  const voiceLabels = engines.kokoro?.voice_labels || {};
+  const defaultEngine = capabilities.default;
   const maxLength = capabilities.limits?.max_text_length || DEFAULT_MAX_LENGTH;
+
+  const kokoro = engines.kokoro || {};
+  const kokoroVoices = kokoro.voices || [];
+  const speedRange = kokoro.speed || {};
+
+  const voiceLabels = Object.fromEntries(
+    kokoroVoices.map((voice) => [voice.id, voice.name]),
+  );
 
   const gate = createGenerationGate();
 
@@ -88,6 +99,7 @@ export function createStudioPage({ capabilities, notifications }) {
 
   metaRow.append(hint, counter);
 
+  // Engine + voice
   const selectors = document.createElement("div");
   selectors.className = "field-row";
 
@@ -98,15 +110,15 @@ export function createStudioPage({ capabilities, notifications }) {
   engineSelect.className = "select";
   engineSelect.id = "engine-select";
 
-  for (const [id, label] of Object.entries(labels)) {
+  for (const [id, info] of Object.entries(engines)) {
     const option = document.createElement("option");
     option.value = id;
-    option.textContent = label;
+    option.textContent = info.name || id;
     engineSelect.append(option);
   }
 
-  if (engines.default) {
-    engineSelect.value = engines.default;
+  if (defaultEngine && engines[defaultEngine]) {
+    engineSelect.value = defaultEngine;
   }
 
   engineField.append(fieldLabel("Engine", "engine-select"), engineSelect);
@@ -118,17 +130,72 @@ export function createStudioPage({ capabilities, notifications }) {
   voiceSelect.className = "select";
   voiceSelect.id = "voice-select";
 
-  for (const id of voices) {
+  for (const voice of kokoroVoices) {
     const option = document.createElement("option");
-    option.value = id;
-    option.textContent = voiceLabels[id] || id;
+    option.value = voice.id;
+    option.textContent = voice.name;
     voiceSelect.append(option);
+  }
+
+  const defaultVoice = kokoroVoices.find((voice) => voice.default);
+
+  if (defaultVoice) {
+    voiceSelect.value = defaultVoice.id;
   }
 
   voiceField.append(fieldLabel("Voice", "voice-select"), voiceSelect);
 
   selectors.append(engineField, voiceField);
 
+  // Speed (Kokoro only)
+  const speedField = document.createElement("div");
+  speedField.className = "field";
+  speedField.id = "speed-field";
+
+  const speedLabelRow = document.createElement("div");
+  speedLabelRow.className = "field-label-row";
+
+  const speedLabel = document.createElement("label");
+  speedLabel.className = "field-label";
+  speedLabel.setAttribute("for", "speed-range");
+  speedLabel.textContent = "Speed";
+
+  const speedValue = document.createElement("span");
+  speedValue.className = "badge badge-accent";
+  speedValue.id = "speed-value";
+
+  speedLabelRow.append(speedLabel, speedValue);
+
+  const speedInput = document.createElement("input");
+  speedInput.type = "range";
+  speedInput.className = "range";
+  speedInput.id = "speed-range";
+  speedInput.min = speedRange.min ?? 0.5;
+  speedInput.max = speedRange.max ?? 2;
+  speedInput.step = "0.05";
+  speedInput.value = speedRange.default ?? 1;
+
+  const speedScale = document.createElement("div");
+  speedScale.className = "range-scale";
+
+  const slow = document.createElement("span");
+  slow.textContent = `${speedInput.min}\u00d7 slower`;
+
+  const fast = document.createElement("span");
+  fast.textContent = `${speedInput.max}\u00d7 faster`;
+
+  speedScale.append(slow, fast);
+  speedField.append(speedLabelRow, speedInput, speedScale);
+
+  const speedNote = document.createElement("p");
+  speedNote.className = "field-note";
+  speedNote.id = "speed-note";
+  speedNote.hidden = true;
+  speedNote.textContent =
+    "Speed is only available for the Kokoro engine. " +
+    "The VoiceForge custom model always uses its native rate.";
+
+  // Actions
   const actions = document.createElement("div");
   actions.className = "composer-actions";
 
@@ -160,7 +227,15 @@ export function createStudioPage({ capabilities, notifications }) {
     examples.append(chip);
   }
 
-  composerBody.append(textField, metaRow, selectors, examples, actions);
+  composerBody.append(
+    textField,
+    metaRow,
+    selectors,
+    speedField,
+    speedNote,
+    examples,
+    actions,
+  );
   composer.append(composerBody);
 
   // --- Output -----------------------------------------------------------
@@ -172,13 +247,20 @@ export function createStudioPage({ capabilities, notifications }) {
   grid.append(composer, side);
 
   // --- Behaviour --------------------------------------------------------
-  function voiceIsRelevant() {
-    return voiceControlsVisible(engineSelect.value);
+  function syncVisibility() {
+    const engineId = engineSelect.value;
+    const voiceEnabled = voiceControlsVisible(engineId);
+    const speedEnabled = speedControlVisible(engineId);
+
+    voiceField.hidden = !voiceEnabled;
+    voiceSelect.disabled = !voiceEnabled;
+    speedField.hidden = !speedEnabled;
+    speedInput.disabled = !speedEnabled;
+    speedNote.hidden = speedEnabled;
   }
 
-  function syncVoiceVisibility() {
-    voiceField.hidden = !voiceIsRelevant();
-    voiceSelect.disabled = !voiceIsRelevant();
+  function updateSpeedLabel() {
+    speedValue.textContent = formatSpeed(speedInput.value);
   }
 
   function updateCounter() {
@@ -194,7 +276,8 @@ export function createStudioPage({ capabilities, notifications }) {
     generateButton.disabled = busy;
     spinner.hidden = !busy;
     engineSelect.disabled = busy;
-    voiceSelect.disabled = busy || !voiceIsRelevant();
+    voiceSelect.disabled = busy || !voiceControlsVisible(engineSelect.value);
+    speedInput.disabled = busy || !speedControlVisible(engineSelect.value);
     textarea.readOnly = busy;
     generateButton.lastChild.textContent = busy
       ? "Generating\u2026"
@@ -221,6 +304,7 @@ export function createStudioPage({ capabilities, notifications }) {
 
     const engine = engineSelect.value;
     const voice = voiceForRequest(engine, voiceSelect.value);
+    const speed = speedForRequest(engine, speedInput.value);
 
     setBusy(true);
 
@@ -229,11 +313,13 @@ export function createStudioPage({ capabilities, notifications }) {
         text: validation.text,
         engine,
         voice,
+        speed,
       });
 
       audioPanel.show(result, {
-        engineLabel: labels[result.engine] || result.engine,
-        voiceLabel: describeVoice(result.engine, voice, voiceLabels),
+        engineLabel: engines[result.engine]?.name || result.engine,
+        voiceLabel: describeVoice(result.engine, result.voice, voiceLabels),
+        speedLabel: describeSpeed(result.engine, result.speed),
       });
 
       notifications.success(
@@ -253,6 +339,8 @@ export function createStudioPage({ capabilities, notifications }) {
   }
 
   textarea.addEventListener("input", updateCounter);
+
+  speedInput.addEventListener("input", updateSpeedLabel);
 
   textarea.addEventListener("keydown", (event) => {
     const action = resolveKeyAction(event, textarea.value);
@@ -282,11 +370,12 @@ export function createStudioPage({ capabilities, notifications }) {
   generateButton.addEventListener("click", startGeneration);
 
   engineSelect.addEventListener("change", () => {
-    syncVoiceVisibility();
+    syncVisibility();
     setBusy(gate.isRunning);
   });
 
-  syncVoiceVisibility();
+  syncVisibility();
+  updateSpeedLabel();
   updateCounter();
 
   return { element: grid, startGeneration };

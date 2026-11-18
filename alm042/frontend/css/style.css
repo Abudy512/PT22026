@@ -124,6 +124,11 @@ kbd {
   background: transparent;
 }
 
+/* The hidden attribute must win over component display rules (flex/grid). */
+[hidden] {
+  display: none !important;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;

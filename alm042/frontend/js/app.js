@@ -5,7 +5,7 @@
  * route between pages and keep the engine status indicator in sync.
  */
 
-import { ApiError, fetchCapabilities } from "./api.js";
+import { ApiError, fetchEngineInfo } from "./api.js";
 import { createNotifications } from "./components/notifications.js";
 import { createComingSoonPage } from "./pages/coming-soon.js";
 import { createStudioPage } from "./pages/studio.js";
@@ -148,13 +148,13 @@ function renderStatus() {
   const { capabilities, error } = store.get();
 
   if (capabilities) {
-    const engineCount = Object.keys(capabilities.engines?.labels || {}).length;
-    const defaultId = capabilities.engines?.default;
-    const defaultLabel =
-      capabilities.engines?.labels?.[defaultId] || defaultId || "engine";
+    const engineList = capabilities.engines || {};
+    const engineCount = Object.keys(engineList).length;
+    const defaultId = capabilities.default;
+    const defaultName = engineList[defaultId]?.name || defaultId || "engine";
 
     dom.statusDot.className = "status-dot is-ready";
-    dom.statusText.textContent = `${engineCount} engines \u00b7 ${defaultLabel.split(" —")[0]} default`;
+    dom.statusText.textContent = `${engineCount} engines \u00b7 ${defaultName.split(" —")[0]} default`;
     return;
   }
 
@@ -170,14 +170,14 @@ function renderBadges() {
     return;
   }
 
-  const defaultId = capabilities.engines?.default;
+  const defaultId = capabilities.default;
+  const defaultName = capabilities.engines?.[defaultId]?.name;
   const maxLength = capabilities.limits?.max_text_length;
 
-  if (defaultId) {
+  if (defaultName) {
     const engineBadge = document.createElement("span");
     engineBadge.className = "badge badge-accent";
-    engineBadge.textContent =
-      capabilities.engines?.labels?.[defaultId]?.split(" —")[0] || defaultId;
+    engineBadge.textContent = defaultName.split(" —")[0];
     dom.badges.append(engineBadge);
   }
 
@@ -272,7 +272,7 @@ async function boot() {
   renderPage();
 
   try {
-    const capabilities = await fetchCapabilities();
+    const capabilities = await fetchEngineInfo();
     store.set({ capabilities });
   } catch (error) {
     const message =

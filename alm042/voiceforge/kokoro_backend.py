@@ -21,6 +21,7 @@ to a mirror if huggingface.co is unreachable.
 from __future__ import annotations
 
 import importlib.util
+import math
 import os
 from pathlib import Path
 
@@ -31,6 +32,14 @@ import torch
 KOKORO_REPO_ID = "hexgrad/Kokoro-82M"
 KOKORO_SAMPLE_RATE = 24000
 DEFAULT_VOICE = "af_heart"
+
+#: Speed range supported by the Kokoro pipeline.
+MIN_SPEED = 0.5
+MAX_SPEED = 2.0
+DEFAULT_SPEED = 1.0
+
+#: Language exposed by this integration (the pipeline is created with "a").
+KOKORO_LANGUAGE = "en-US"
 
 #: Curated American-English voices exposed by the interface.
 KOKORO_VOICES: dict[str, str] = {
@@ -46,6 +55,30 @@ KOKORO_VOICES: dict[str, str] = {
 
 class KokoroError(RuntimeError):
     """Raised when the Kokoro backend cannot be used."""
+
+
+def validate_speed(value: object) -> float:
+    """
+    Validate a Kokoro speed value and return it as a float.
+
+    Kokoro accepts ``speed`` per call (``KPipeline.__call__``), so a new
+    value does not require rebuilding the pipeline.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"Speed must be a number between {MIN_SPEED} and {MAX_SPEED}."
+        )
+
+    speed = float(value)
+
+    if not math.isfinite(speed) or not MIN_SPEED <= speed <= MAX_SPEED:
+        raise ValueError(
+            f"Speed must be between {MIN_SPEED} and {MAX_SPEED} "
+            f"(got {value})."
+        )
+
+    return speed
 
 
 def kokoro_is_installed() -> bool:
@@ -239,16 +272,26 @@ class KokoroBackend:
 
         return self._pipeline
 
-    def synthesize(self, text: str, voice: str | None = None) -> np.ndarray:
+    def synthesize(
+        self,
+        text: str,
+        voice: str | None = None,
+        speed: float | None = None,
+    ) -> np.ndarray:
         """
         Generate speech and return a mono float32 waveform at 24 kHz.
 
         Kokoro works sentence by sentence, so the chunks are concatenated.
+        ``speed`` is applied per call, which the pipeline supports directly;
+        the loaded model is reused.
         """
 
         pipeline = self.load()
 
         selected_voice = voice or self.voice
+        selected_speed = validate_speed(
+            self.speed if speed is None else speed
+        )
 
         if selected_voice not in KOKORO_VOICES:
             raise ValueError(
@@ -262,7 +305,7 @@ class KokoroBackend:
             for _, _, audio in pipeline(
                 text,
                 voice=selected_voice,
-                speed=self.speed,
+                speed=selected_speed,
             ):
                 chunks.append(
                     audio.detach().cpu().numpy()
@@ -292,10 +335,11 @@ class KokoroBackend:
         text: str,
         output_path: str | Path,
         voice: str | None = None,
+        speed: float | None = None,
     ) -> Path:
         """Synthesise ``text`` and write a 24 kHz 16-bit PCM WAV file."""
 
-        waveform = self.synthesize(text, voice=voice)
+        waveform = self.synthesize(text, voice=voice, speed=speed)
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)

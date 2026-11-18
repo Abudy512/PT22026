@@ -30,7 +30,7 @@ VoiceForge is a university project with **two speech engines**:
 | Main engine | Kokoro-82M (pretrained, Apache-2.0) |
 | Custom model | Tacotron-lite, 2,997,410 parameters |
 | Dataset (custom model) | LJSpeech 1.1 (13,100 clips, single speaker, 22,050 Hz) |
-| Tests | 50 automated tests (26 Python + 24 JavaScript) |
+| Tests | 77 automated tests (48 Python + 29 JavaScript), plus 7 optional real-Kokoro tests |
 
 ---
 
@@ -93,6 +93,8 @@ VoiceForge solves this with its own attention-based acoustic model:
 - **Griffin-Lim vocoder** — reproducible, dependency-free waveform
   reconstruction for the custom model; Kokoro uses an iSTFTNet decoder.
 - **Seven Kokoro voices** — American English female and male voices.
+- **Speech speed control** — 0.5× to 2.0× for Kokoro, applied per request
+  without reloading the model.
 - **Command line generation** — `python -m scripts.generate`.
 - **Interactive web application** — engine and voice selectors, text input,
   playback, WAV download, validation messages and a loading indicator.
@@ -412,6 +414,7 @@ The interface provides:
 
 - a **speech engine selector** (Kokoro / VoiceForge custom),
 - a **Kokoro voice selector** (seven American English voices),
+- a **speed slider** (0.5×–2.0×, Kokoro only; hidden for the custom model),
 - an English text box with a character counter and example sentences,
 - a **Generate Speech** button with a loading indicator,
 - in-browser playback and a **Download WAV** link,
@@ -419,6 +422,44 @@ The interface provides:
   is pretrained and which is the student's own experimental model.
 
 Everything runs locally; no text or audio leaves the machine.
+
+### HTTP API
+
+| Method | Path | Body | Purpose |
+|---|---|---|---|
+| GET | `/` | — | The application shell |
+| GET | `/health` | — | Legacy status + engine summary |
+| GET | `/api/engines` | — | **Source of truth**: engines, voices, languages, sample rates, speed ranges, limits, capabilities |
+| POST | `/generate` | `{text, engine, voice?, speed?}` | Legacy generation endpoint |
+| POST | `/api/generate` | `{text, engine, voice?, speed?}` | Generation endpoint (same implementation) |
+| GET | `/audio/<file>` | — | Playback and download |
+
+```json
+// POST /api/generate
+{"text": "Hello world.", "engine": "kokoro", "voice": "af_heart", "speed": 1.25}
+
+// 200
+{
+  "ok": true,
+  "text": "Hello world.",
+  "filename": "eeb6873e1412.wav",
+  "audio_url": "/audio/eeb6873e1412.wav",
+  "duration_seconds": 2.27,
+  "sample_rate": 24000,
+  "engine": "kokoro",
+  "voice": "af_heart",
+  "speed": 1.25,
+  "padded": false,
+  "truncated": false
+}
+
+// 400 (one consistent error shape)
+{"ok": false, "error": "Speed must be between 0.5 and 2.0 (got 3).", "code": "invalid_speed"}
+```
+
+Error codes: `invalid_engine`, `invalid_voice`, `invalid_speed`, `speed_not_supported`,
+`empty_text`, `text_too_long`, `unsupported_characters`, `bad_request`,
+`audio_not_found`, `checkpoint_missing`, `internal_error`.
 
 ### Optional Gradio front-end
 
@@ -470,8 +511,8 @@ node --test frontend/tests
 ```
 
 ```
-26 passed, 3 skipped        # Python (the 3 skipped are optional real-Kokoro tests)
-24 passed                   # JavaScript
+48 passed, 4 skipped        # Python (the 4 skipped are optional real-Kokoro tests)
+29 passed                   # JavaScript
 ```
 
 The optional Kokoro API tests load the real 82M model, so they are gated:

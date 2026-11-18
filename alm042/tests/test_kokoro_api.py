@@ -68,3 +68,50 @@ def test_kokoro_rejects_unknown_voice(server):
 
     assert error.value.code == 400
     assert "voice" in payload["error"].lower()
+
+
+def _generate(server, text, speed):
+    with http_post_json(
+        server + "/api/generate",
+        {"text": text, "engine": "kokoro", "voice": "af_heart", "speed": speed},
+    ) as response:
+        return json.loads(response.read())
+
+
+@pytest.mark.parametrize("speed", [0.5, 1.0, 2.0])
+def test_kokoro_speed_values_generate_valid_audio(server, speed):
+    result = _generate(server, "Hello from VoiceForge.", speed)
+
+    assert result["engine"] == "kokoro"
+    assert result["speed"] == speed
+    assert result["duration_seconds"] > 0
+
+    with http_get(server + result["audio_url"]) as response:
+        audio = response.read()
+
+    assert response.status == 200
+    assert audio[:4] == b"RIFF"
+
+
+def test_kokoro_speed_actually_changes_duration(server):
+    """Real model check: 0.5x is longer than 1.0x, which is longer than 2.0x."""
+
+    text = "The weather is pleasant today."
+
+    slow = _generate(server, text, 0.5)
+    normal = _generate(server, text, 1.0)
+    fast = _generate(server, text, 2.0)
+
+    assert slow["speed"] == 0.5
+    assert normal["speed"] == 1.0
+    assert fast["speed"] == 2.0
+
+    assert slow["duration_seconds"] > normal["duration_seconds"] * 1.5
+    assert fast["duration_seconds"] < normal["duration_seconds"] * 0.75
+
+    # The audio itself must be valid at every speed.
+    for result in (slow, normal, fast):
+        with http_get(server + result["audio_url"]) as response:
+            audio = response.read()
+        assert audio[:4] == b"RIFF"
+        assert len(audio) > 1000

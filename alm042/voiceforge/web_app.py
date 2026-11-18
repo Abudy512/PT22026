@@ -14,6 +14,7 @@ CSS and ES modules).  This module only serves those files and the JSON API:
 from __future__ import annotations
 
 import json
+import traceback
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -94,15 +95,52 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
 
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # The client closed the connection (tab closed, reload...).
+            return
 
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload).encode("utf-8")
         self._send_bytes(status, body, "application/json; charset=utf-8")
 
-    def _send_error_json(self, status: int, message: str) -> None:
-        self._send_json(status, {"ok": False, "error": message})
+    def _send_error_json(
+        self,
+        status: int,
+        message: str,
+        code: str = "bad_request",
+    ) -> None:
+        """
+        One consistent error shape for every API endpoint:
+
+            {"ok": false, "error": "<human message>", "code": "<machine code>"}
+        """
+
+        self._send_json(status, {"ok": False, "error": message, "code": code})
+
+    def _send_app_error(self, error: AppError) -> None:
+        """Send an expected application error with its status and code."""
+
+        self._send_error_json(error.status, error.message, error.code)
+
+    def _log_internal_error(self) -> None:
+        """Print the traceback on the server; never send it to the client."""
+
+        print("[web] internal error:", flush=True)
+        traceback.print_exc()
+
+    def _send_internal_error(self) -> None:
+        try:
+            self._send_error_json(
+                500,
+                "The server could not complete the request. "
+                "Please try again.",
+                "internal_error",
+            )
+        except Exception:  # noqa: BLE001 - client already disconnected
+            pass
 
     def _read_json_body(self) -> dict[str, Any]:
         try:
@@ -132,6 +170,15 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
     # GET
     # ------------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802 (standard library naming)
+        try:
+            self._handle_get()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception:  # noqa: BLE001 - never leak a traceback
+            self._log_internal_error()
+            self._send_internal_error()
+
+    def _handle_get(self) -> None:
         # Unquote so that encoded traversal attempts are inspected as paths.
         path = unquote(self.path.split("?", 1)[0])
 
@@ -152,6 +199,13 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
                     "limits": {"max_text_length": MAX_TEXT_LENGTH},
                     "engines": self.app.describe_engines(),
                 },
+            )
+            return
+
+        if path == "/api/engines":
+            self._send_json(
+                200,
+                {"ok": True, **self.app.describe_engine_details()},
             )
             return
 
@@ -212,7 +266,9 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
         try:
             path = self.app.resolve_audio(filename)
         except AppError as error:
-            self._send_error_json(404, str(error))
+            # Audio failures are always 404 so the endpoint never reveals
+            # whether a file exists outside the output folder.
+            self._send_error_json(404, error.message, error.code)
             return
 
         data = path.read_bytes()
@@ -228,11 +284,28 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
     # POST
     # ------------------------------------------------------------------
     def do_POST(self) -> None:  # noqa: N802 (standard library naming)
+        try:
+            self._handle_post()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception:  # noqa: BLE001 - never leak a traceback
+            self._log_internal_error()
+            self._send_internal_error()
+
+    def _handle_post(self) -> None:
         path = self.path.split("?", 1)[0]
 
-        if path != "/generate":
-            self._send_error_json(404, "Page not found.")
+        if path not in ("/generate", "/api/generate"):
+            self._send_error_json(404, "Page not found.", "not_found")
             return
+
+        self._handle_generate()
+
+    def _handle_generate(self) -> None:
+        """
+        Shared implementation for ``POST /generate`` and
+        ``POST /api/generate``.
+        """
 
         try:
             payload = self._read_json_body()
@@ -240,9 +313,10 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
                 payload.get("text"),
                 engine=payload.get("engine") or None,
                 voice=payload.get("voice") or None,
+                speed=payload.get("speed"),
             )
         except AppError as error:
-            self._send_error_json(400, str(error))
+            self._send_app_error(error)
             return
 
         self._send_json(
@@ -255,6 +329,8 @@ class VoiceForgeHandler(BaseHTTPRequestHandler):
                 "duration_seconds": result.duration_seconds,
                 "sample_rate": result.sample_rate,
                 "engine": result.engine,
+                "voice": result.voice,
+                "speed": result.speed,
                 "padded": result.padded,
                 "truncated": result.truncated,
             },

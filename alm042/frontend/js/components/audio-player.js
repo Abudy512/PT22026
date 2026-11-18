@@ -55,6 +55,7 @@ export function createAudioPanel() {
 
   const audio = document.createElement("audio");
   audio.className = "audio-player";
+  audio.id = "player";
   audio.controls = true;
   audio.preload = "metadata";
 
@@ -64,6 +65,7 @@ export function createAudioPanel() {
   const meta = {
     engine: metaItem("Engine"),
     voice: metaItem("Voice"),
+    speed: metaItem("Speed"),
     duration: metaItem("Duration"),
     sampleRate: metaItem("Sample rate"),
   };
@@ -71,6 +73,7 @@ export function createAudioPanel() {
   grid.append(
     meta.engine.item,
     meta.voice.item,
+    meta.speed.item,
     meta.duration.item,
     meta.sampleRate.item,
   );
@@ -80,6 +83,7 @@ export function createAudioPanel() {
 
   const download = document.createElement("a");
   download.className = "button button-ghost";
+  download.id = "download";
   download.textContent = "\u2b07 Download WAV";
   download.setAttribute("download", "");
 
@@ -98,7 +102,7 @@ export function createAudioPanel() {
     /**
      * @param {{audio_url: string, filename: string, duration_seconds: number,
      *          sample_rate: number, engine: string}} result
-     * @param {{engineLabel: string, voiceLabel: string}} labels
+     * @param {{engineLabel: string, voiceLabel: string, speedLabel: string}} labels
      */
     show(result, labels) {
       audio.src = result.audio_url;
@@ -107,6 +111,7 @@ export function createAudioPanel() {
 
       setMeta(meta.engine, labels.engineLabel);
       setMeta(meta.voice, labels.voiceLabel);
+      setMeta(meta.speed, labels.speedLabel);
       setMeta(meta.duration, `${result.duration_seconds.toFixed(2)} s`);
       setMeta(meta.sampleRate, `${result.sample_rate.toLocaleString()} Hz`);
 

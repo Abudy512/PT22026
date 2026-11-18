@@ -18,11 +18,16 @@ import soundfile as sf
 
 from voiceforge import DEFAULT_CHECKPOINT
 from voiceforge.kokoro_backend import (
+    DEFAULT_SPEED,
     DEFAULT_VOICE,
+    KOKORO_LANGUAGE,
     KOKORO_VOICES,
+    MAX_SPEED,
+    MIN_SPEED,
     KokoroBackend,
     KokoroError,
     kokoro_is_installed,
+    validate_speed,
 )
 from voiceforge.text import normalize_text, text_to_sequence
 from voiceforge.tts import VoiceForgeTTS
@@ -47,7 +52,23 @@ ENGINE_LABELS = {
 
 
 class AppError(Exception):
-    """An error whose message is safe and useful to show to the user."""
+    """
+    An error whose message is safe and useful to show to the user.
+
+    ``code`` is a stable machine-readable identifier for API clients and
+    ``status`` the HTTP status the server should use.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        code: str = "bad_request",
+        status: int = 400,
+    ):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -62,6 +83,8 @@ class SynthesisResult:
     padded: bool
     sample_rate: int = 22050
     engine: str = "voiceforge"
+    voice: str | None = None
+    speed: float | None = None
 
 
 class VoiceForgeApp:
@@ -134,7 +157,8 @@ class VoiceForgeApp:
                 raise AppError(
                     f"Model checkpoint not found: {self.checkpoint_path}. "
                     "Train one with 'python -m scripts.train' or point "
-                    "--checkpoint at an existing file."
+                    "--checkpoint at an existing file.",
+                    code="checkpoint_missing",
                 )
 
             try:
@@ -196,7 +220,8 @@ class VoiceForgeApp:
         if chosen not in SUPPORTED_ENGINES:
             raise AppError(
                 f"Unknown speech engine {chosen!r}. "
-                f"Available: {', '.join(SUPPORTED_ENGINES)}"
+                f"Available: {', '.join(SUPPORTED_ENGINES)}",
+                code="invalid_engine",
             )
 
         return chosen
@@ -222,13 +247,81 @@ class VoiceForgeApp:
             },
         }
 
+    def describe_engine_details(self) -> dict:
+        """
+        Structured engine capabilities for ``GET /api/engines``.
+
+        The values come from the same constants the engines use, so the
+        frontend never has to hardcode a voice list or a speed range.
+        """
+
+        return {
+            "default": self.resolve_engine(),
+            "requested": self.requested_engine,
+            "limits": {"max_text_length": MAX_TEXT_LENGTH},
+            "engines": {
+                ENGINE_KOKORO: {
+                    "id": ENGINE_KOKORO,
+                    "name": ENGINE_LABELS[ENGINE_KOKORO],
+                    "installed": kokoro_is_installed(),
+                    "loaded": self._kokoro is not None,
+                    "language": KOKORO_LANGUAGE,
+                    "sample_rate": KokoroBackend.SAMPLE_RATE,
+                    "voices": [
+                        {
+                            "id": voice_id,
+                            "name": label,
+                            "default": voice_id == DEFAULT_VOICE,
+                        }
+                        for voice_id, label in KOKORO_VOICES.items()
+                    ],
+                    "speed": {
+                        "supported": True,
+                        "min": MIN_SPEED,
+                        "max": MAX_SPEED,
+                        "default": DEFAULT_SPEED,
+                    },
+                    "max_text_length": MAX_TEXT_LENGTH,
+                    "capabilities": [
+                        "text-to-speech",
+                        "voice-selection",
+                        "speed-control",
+                    ],
+                },
+                ENGINE_VOICEFORGE: {
+                    "id": ENGINE_VOICEFORGE,
+                    "name": ENGINE_LABELS[ENGINE_VOICEFORGE],
+                    "installed": self.checkpoint_path.is_file(),
+                    "loaded": self._pipeline is not None,
+                    "language": "en-US",
+                    "sample_rate": 22050,
+                    "voices": [
+                        {
+                            "id": "default",
+                            "name": "LJSpeech single speaker",
+                            "default": True,
+                        }
+                    ],
+                    "speed": {
+                        "supported": False,
+                        "min": None,
+                        "max": None,
+                        "default": None,
+                    },
+                    "max_text_length": MAX_TEXT_LENGTH,
+                    "capabilities": ["text-to-speech"],
+                },
+            },
+        }
+
     def set_engine(self, engine: str) -> None:
         """Change the default engine (used for startup fallbacks)."""
 
         if engine not in (ENGINE_AUTO, *SUPPORTED_ENGINES):
             raise AppError(
                 f"Unknown speech engine {engine!r}. "
-                f"Available: {', '.join(SUPPORTED_ENGINES)}"
+                f"Available: {', '.join(SUPPORTED_ENGINES)}",
+                code="invalid_engine",
             )
 
         self.requested_engine = engine
@@ -250,24 +343,26 @@ class VoiceForgeApp:
         """
 
         if not isinstance(text, str):
-            raise AppError("Please enter text as a string.")
+            raise AppError("Please enter text as a string.", code="invalid_text")
 
         cleaned = text.strip()
 
         if not cleaned:
-            raise AppError("Please enter some English text first.")
+            raise AppError("Please enter some English text first.", code="empty_text")
 
         if len(cleaned) > MAX_TEXT_LENGTH:
             raise AppError(
                 f"Text is too long ({len(cleaned)} characters). "
-                f"Please keep it under {MAX_TEXT_LENGTH} characters."
+                f"Please keep it under {MAX_TEXT_LENGTH} characters.",
+                code="text_too_long",
             )
 
         if engine == ENGINE_VOICEFORGE:
             if not normalize_text(cleaned):
                 raise AppError(
                     "The text contains no usable characters. "
-                    "Please enter English words."
+                    "Please enter English words.",
+                    code="empty_text",
                 )
 
             try:
@@ -276,10 +371,11 @@ class VoiceForgeApp:
                 raise AppError(
                     f"{error}. The custom VoiceForge model supports English "
                     "letters and the punctuation . , ! ? - ' \" ; : ( ). "
-                    "Switch to the Kokoro engine for digits."
+                    "Switch to the Kokoro engine for digits.",
+                    code="unsupported_characters",
                 ) from error
         elif not any(character.isalnum() for character in cleaned):
-            raise AppError("Please enter some English words.")
+            raise AppError("Please enter some English words.", code="empty_text")
 
         return cleaned
 
@@ -291,17 +387,46 @@ class VoiceForgeApp:
         text: object,
         engine: str | None = None,
         voice: str | None = None,
+        speed: float | None = None,
     ) -> SynthesisResult:
         """
-        Validate ``text``, generate speech with the chosen engine and return
-        the WAV details.
+        Validate the request, generate speech with the chosen engine and
+        return the WAV details.
 
-        ``engine`` may be ``"kokoro"``, ``"voiceforge"`` or ``None`` to use
-        the configured default. ``voice`` only applies to Kokoro.
+        ``engine`` may be ``"kokoro"``, ``"voiceforge"`` or ``None`` for the
+        configured default. ``voice`` and ``speed`` only apply to Kokoro;
+        sending them to the custom engine is an error rather than being
+        silently ignored.
         """
 
         chosen = self.resolve_engine(engine)
         cleaned = self.validate_text(text, chosen)
+
+        effective_voice: str | None = None
+        effective_speed: float | None = None
+
+        if chosen == ENGINE_KOKORO:
+            effective_voice = voice or DEFAULT_VOICE
+
+            if effective_voice not in KOKORO_VOICES:
+                raise AppError(
+                    f"Unknown Kokoro voice {effective_voice!r}. "
+                    f"Available: {', '.join(KOKORO_VOICES)}",
+                    code="invalid_voice",
+                )
+
+            try:
+                effective_speed = validate_speed(
+                    DEFAULT_SPEED if speed is None else speed
+                )
+            except ValueError as error:
+                raise AppError(str(error), code="invalid_speed") from error
+        elif speed is not None:
+            raise AppError(
+                "Speech speed is only supported by the Kokoro engine. "
+                "The VoiceForge custom model always uses its native rate.",
+                code="speed_not_supported",
+            )
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -316,9 +441,17 @@ class VoiceForgeApp:
 
             with self._lock:
                 try:
-                    backend.save(cleaned, output_path, voice=voice)
+                    backend.save(
+                        cleaned,
+                        output_path,
+                        voice=effective_voice,
+                        speed=effective_speed,
+                    )
                 except (KokoroError, ValueError) as error:
-                    raise AppError(str(error)) from error
+                    raise AppError(
+                        str(error),
+                        code="kokoro_error",
+                    ) from error
         else:
             pipeline = self.load()
 
@@ -330,13 +463,19 @@ class VoiceForgeApp:
 
         if not output_path.is_file() or output_path.stat().st_size == 0:
             raise AppError(
-                "Speech generation failed: the audio file was not written."
+                "Speech generation failed: the audio file was not written.",
+                code="generation_failed",
+                status=500,
             )
 
         info = sf.info(str(output_path))
 
         if info.frames == 0:
-            raise AppError("Speech generation produced an empty audio file.")
+            raise AppError(
+                "Speech generation produced an empty audio file.",
+                code="generation_failed",
+                status=500,
+            )
 
         return SynthesisResult(
             text=cleaned,
@@ -347,6 +486,8 @@ class VoiceForgeApp:
             padded=padded,
             sample_rate=info.samplerate,
             engine=chosen,
+            voice=effective_voice,
+            speed=effective_speed,
         )
 
     def resolve_audio(self, filename: str) -> Path:
@@ -356,15 +497,15 @@ class VoiceForgeApp:
         """
 
         if not filename or "/" in filename or "\\" in filename:
-            raise AppError("Invalid audio file name.")
+            raise AppError("Invalid audio file name.", code="invalid_filename")
 
         if not filename.endswith(".wav"):
-            raise AppError("Invalid audio file name.")
+            raise AppError("Invalid audio file name.", code="invalid_filename")
 
         candidate = (self.output_dir / filename).resolve()
         output_root = self.output_dir.resolve()
 
         if not candidate.is_file() or output_root not in candidate.parents:
-            raise AppError("Audio file not found.")
+            raise AppError("Audio file not found.", code="audio_not_found", status=404)
 
         return candidate
